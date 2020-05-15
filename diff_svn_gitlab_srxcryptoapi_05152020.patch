@@ -1,0 +1,2652 @@
+--- /opt/project/NIST-BGP-SRx/srx-crypto-api/./srx/srxcryptoapi.h	2020-05-07 12:52:09.913785252 -0400
++++ ./srx/srxcryptoapi.h	2017-11-27 15:17:52.000000000 -0500
+@@ -19,11 +19,34 @@
+  * BGPSEC implementations. This library allows to switch the crypto 
+  * implementation dynamically.
+  *
+- * @version 0.2.0.4
++ * @version 0.3.0.0
+  * 
+  * ChangeLog:
+  * -----------------------------------------------------------------------------
++ *   0.3.0.0 - 2017/09/13 - oborchert
++ *             * Added wording to the init method, when it has to return FAILURE
++ *           - 2017/08/18 - oborchert
++ *             * Modified description of cleanKeys to clean only public keys and
++ *               added function cleanPrivateKeys.
++ *             * Fixed speller in function name sca_generateOriginHashMessage
++ *           - 2017/08/15 - oborchert
++ *             * Added function sca_getAlgorithmIDs to allow retrieval of the 
++ *               algorithm IDs within the signature block.
++ *             * Changed define BGP_UPD_A_FLAGS_EXT_LENGTH into 
++ *               SCA_BGP_UPD_A_FLAGS_EXT_LENGTH.
++ *             * Added error code API_STATUS_ERR_SYNTAX
++ *           - 2017/08/20 - oborchert
++ *             * Modified the register and unregister functions to include
++ *               a source identifier.
++ *              * Added function cleanKeys
++ *           - 2017/08/08 - oborchert
++ *             * Modified the behavior of the API for validate and sign. 
++ *             * Changed status flag from 16 to 32 bit
++ *             * Modified function header of sign including the expected
++ *               behavior. See function description for more detail.
++ *             * Added function isAlgorithmSupported
+  *   0.2.0.4 - 2017/09/15 - oborchert
++ *             (merged from branch)
+  *             * Added more documentation. 
+  *   0.2.0.3 - 2017/07/09 - oborchert
+  *             * Added define ECDSA_PUB_KEY_DER_LENGTH
+@@ -109,41 +132,68 @@
+ #define API_VALRESULT_VALID    1
+ /** Update validation returns INVALID */
+ #define API_VALRESULT_INVALID  0
++/** Update validation algorithm not supported 
++ * (e.g. no supported algorithm found) 
++ * @since 0.3.0.0*/
++#define API_VALRESULT_FAILURE     -1
+ 
+ /* Mask to detect errors in the status flag. */
+-#define API_STATUS_ERROR_MASK           0xFF00
++#define API_STATUS_ERROR_MASK            0xFFFF0000
+ /* Mask to detect information in the status flag. */
+-#define API_STATUS_INFO_MASK            0x00FF
++#define API_STATUS_INFO_MASK             0x0000FFFF
+ /** All OK - no additional information */
+-#define API_STATUS_OK                   0x0000
++#define API_STATUS_OK                    0x00000000
+ /** one or more signatures could failed validation */
+-#define API_STATUS_INFO_SIGNATURE       0x0001
++#define API_STATUS_INFO_SIGNATURE        0x00000001
+ /** A key not found */
+-#define API_STATUS_INFO_KEY_NOTFOUND    0x0002
++#define API_STATUS_INFO_KEY_NOTFOUND     0x00000002
+ /** A user defined status */
+-#define API_STATUS_INFO_USER1           0x0040
++#define API_STATUS_INFO_USER1            0x00001000
+ /** A user defined status */
+-#define API_STATUS_INFO_USER2           0x0080
++#define API_STATUS_INFO_USER2            0x00002000
++/** A user defined status
++ * @since 0.3.0 */
++#define API_STATUS_INFO_USER3            0x00004000
++/** A user defined status
++ * @since 0.3.0 */
++#define API_STATUS_INFO_USER4            0x00008000
+ 
+ // Error reports
+ /** Input update data / or precomputed hash is missing */
+-#define API_STATUS_ERR_NO_DATA          0x0100
++#define API_STATUS_ERR_NO_DATA           0x00010000
+ /** Input prefix data is missing */
+-#define API_STATUS_ERR_NO_PREFIX        0x0200
++#define API_STATUS_ERR_NO_PREFIX         0x00020000
+ /** Invalid key - e.g. RSA key and ECDSA key expected. */
+-#define API_STATUS_ERR_INVLID_KEY       0x0400
++#define API_STATUS_ERR_INVLID_KEY        0x00040000        //   <-- could this be an INFO value
+ /** General key I/O error . */
+-#define API_STATUS_ERR_KEY_IO           0x0800
++#define API_STATUS_ERR_KEY_IO            0x00080000
+ /** A hash buffer to small */
+-#define API_STATUS_ERR_INSUF_BUFFER     0x1000
++#define API_STATUS_ERR_INSUF_BUFFER      0x00100000
+ /** A Not enough storage for keys */
+-#define API_STATUS_ERR_INSUF_KEYSTORAGE 0x2000
++#define API_STATUS_ERR_INSUF_KEYSTORAGE  0x00200000
++/** While signing, the requested algorithm id is supported, while validating,
++ * none of the max 2 requested algorithm validations are supported. */
++#define API_STATUS_ERR_UNSUPPPORTED_ALGO 0x00400000
++/** Unexpected syntax error while parsing data. */
++#define API_STATUS_ERR_SYNTAX            0x00800000
+ /** A user defined error */
+-#define API_STATUS_ERR_USER1            0x4000
++#define API_STATUS_ERR_USER1             0x10000000
+ /** A user defined error */
+-#define API_STATUS_ERR_USER2            0x8000
++#define API_STATUS_ERR_USER2             0x20000000
++/** A user defined error
++ * @since 0.3.0 */
++#define API_STATUS_ERR_USER3             0x40000000
++/** A user defined error
++ * @since 0.3.0 */
++#define API_STATUS_ERR_USER4             0x80000000
++
+ /** This flag specifies the length field in the BGP Path Attribute. */
+-#define BGP_UPD_A_FLAGS_EXT_LENGTH      0x10
++#define SCA_BGP_UPD_A_FLAGS_EXT_LENGTH 0x10
++/** Pre-defined source for use of internal source (e.g. dugin init etc) */
++#define SCA_KSOURCE_INTERNAL 0
++
++/** Maximum number of signature blocks within an UPDATE. */
++#define SCA_MAX_SIGBLOCK_COUNT 2
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+ // BGPSEC Path Structures
+@@ -224,9 +274,15 @@ typedef struct {
+ // SRx Crypto API Structures
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-/** Used for the status information - Use this instead of u_int_16_t to allow
+- * future type change if more codes are required. */
+-typedef u_int16_t sca_status_t;
++/** Used for the status information. The upper two bytes are used for ERROR and
++ * the lower two bytes are used for INFO values. All values are BIT coded. 
++ * Modified from 16 bit to 32 bit with version 0.3.0.0*/
++typedef u_int32_t sca_status_t;
++
++/** Used to allow identifying the source for keys.
++ * @see #SCA_KSOURCE_INTERNAL
++ * @since 0.3.0.0 */
++typedef u_int8_t sca_key_source_t;
+ 
+ // Crypto API types
+ /** The BGPSec Key wrapper. The stored key structure is in DER format.*/
+@@ -270,7 +326,7 @@ typedef struct
+ /** 
+  * This structure is used as a helper. It does have pointers into the 
+  * hashMessage to quickly access the data within the digest.
+-   if Provided, No parsing through the structure is necessary anymore.
++ * if Provided, No parsing through the structure is necessary anymore.
+  * 
+  * The pointers are explained more in detail in the next data structure
+  */
+@@ -341,13 +397,15 @@ typedef struct
+  *       || Prefix                          || 0 |   |   |
+  * ------+===================================+---/---/---/
+  *
++ * The user must allocate and free the memory used for instances of this 
++ * complete SCA_HashMessage struct. Handling of the buffer memory is either
++ * done by the user (ownedByAPI=false) or by the API (ownedByAPI=true)
+  */
+ typedef struct 
+ {
+-  /** Indicates if the memory of the signature buffer is maintained by the API. 
+-   * In this case it is required to call the freeHashMessage(...) function of 
+-   * the API instance. Otherwise a cleanup by the user can be performed. The 
+-   * instance of SCA_HashMessage must be freed by the user as well.
++  /** Indicates if the memory of the hash message is maintained by the API. 
++   * In this case it is required to call the freeHashMessage(...) function 
++   * of the API instance. Otherwise the user must perform the a cleanup. 
+    */
+   bool      ownedByAPI;
+   
+@@ -365,12 +423,12 @@ typedef struct
+    * itself.*/
+   u_int8_t* buffer;
+   
+-  /** Number of segments in this buffer 
+-   * (size of the hashMessageValPtr array below). */
++  /** Number of path segments in this buffer. This value is same as the number
++   * of hashMessageValPtr elements in the  hashMessageValPtr array. */
+   u_int16_t segmentCount;
+   
+-  /** This array contains one element for each segment. The pointers reach into 
+-   * the buffer for easy access during validation. */
++  /** This array contains one element for each secure path segment. The pointers 
++   * reach into the buffer for easy access during validation. */
+   SCA_HashMessagePtr** hashMessageValPtr;
+   
+ } SCA_HashMessage;
+@@ -400,17 +458,45 @@ typedef struct
+ } SCA_Signature;
+ 
+ /**
+- * This structure is used as input for the sign message. 
++ * the memory for this structure must be allocated by the user of the API.
++ * It is the input data into the validation process. The API itself will
++ * create and allocate the HashMessages and assign them to the hashMessage 
++ * array.
++ * All fields except the hashMessage array fields are input fields. 
++ * The array will be filled by the API and returned to the caller. The API is 
++ * responsible to removing it. for this the caller uses the API's 
++ * freeHashMessage function.
+  */
+ typedef struct
+ {
+-  /** The peer to whom to send the data to (network format). */
+-  u_int32_t peerAS;
+-  /** The information of this host (network format) */
+-  SCA_BGPSEC_SecurePathSegment* myHost;
+-  /** The prefix information - will only be used if the digest or digest buffer
+-   * is empty (NULL) */
++  /** The last AS (own AS) this data is signed to in network format. */
++  u_int32_t    myAS;
++  /** Pointer to the variable that will contain the status information of this
++   * validation call.*/
++  sca_status_t status;
++  /** The bgpsec path attribute to be validated. */
++  u_int8_t*    bgpsec_path_attr;
++  /** The prefix information required for validation. */
+   SCA_Prefix* nlri;
++  /** The message that will be hashed. */
++  SCA_HashMessage*  hashMessage[2];
++} SCA_BGPSecValidationData;
++
++/**
++ * This structure is used as input for the sign message. The caller MUST provide
++ * all data except the signature. This must be NULL when calling sign.
++ */
++typedef struct
++{
++  /** MUST NOT BE USED ANYMORE */
++  __attribute__((deprecated))u_int32_t peerAS;
++  /** MUST NOT BE USED ANYMORE */
++  __attribute__((deprecated))SCA_BGPSEC_SecurePathSegment* myHost;
++  /** MUST NOT BE USED ANYMORE */
++  __attribute__((deprecated))SCA_Prefix* nlri;
++  
++  /* Needed to find the correct private key. */
++  u_int32_t myASN; 
+   /** The SKI for the private key. */
+   u_int8_t* ski;      
+   /** The algorithm ID. */
+@@ -434,33 +520,6 @@ typedef struct
+   SCA_Signature* signature;
+ } SCA_BGPSecSignData;
+ 
+-
+-/** 
+- * the memory for this structure must be allocated by the user of the API.
+- * It is the input data into the validation process. The API itself will
+- * create and allocate the HashMessages and assign them to the hashMessage 
+- * array.
+- * All fields except the hashMessage array fields are input fields. 
+- * The array will be filled by the API and returned to the caller. The API is 
+- * responsible to removing it. for this the caller uses the API's 
+- * freeHashMessage function.
+- */
+-typedef struct
+-{
+-  /** The last AS (own AS) this data is signed to in network format. */
+-  u_int32_t    myAS;
+-  /** Pointer to the variable that will contain the status information of this
+-   * validation call.*/
+-  sca_status_t status;
+-  /** The bgpsec path attribute to be validated. */
+-  u_int8_t*    bgpsec_path_attr;
+-  /** The prefix information required for validation. */
+-  SCA_Prefix*  nlri;
+-  /** The message that will be hashed. */
+-  SCA_HashMessage*  hashMessage[2];
+-} SCA_BGPSecValidationData;
+-
+-
+ #define MAX_CFGFILE_NAME 255
+ 
+ /* The SRxCryptoAPI wrapper object.*/
+@@ -474,15 +533,18 @@ typedef struct
+   /**
+    * Perform a Library initialization by passing a \0 terminated string. This 
+    * value can also be NULL.
+-   * This function returns 0 in case of an error. In this case the library 
+-   * cannot be used.
++   * This function returns API_FAILURE in case of an error or failure the API 
++   * cannot recover from - otherwise return a SUCCESS and ass an INFO flag to 
++   * the status.
++   * 
++   * In case the function returns API_FAILURE, the API must not be used.
+    * 
+    * @param value A \0 terminated string or NULL.
+    * @param debugLevel the debugging level - Follows the system debug levels.
+    *                   -1 indicates to NOT modify the log level.
+    * @param status The status variable that returns more information.
+    * 
+-   * @return API_SUCCESS(1) or API_FAILURE (0 - check status)
++   * @return API_SUCCESS or API_FAILURE (check status)
+    */
+   int (*init)(const char* value, int debugLevel, sca_status_t* status);
+   
+@@ -492,7 +554,7 @@ typedef struct
+    * 
+    * @param status The status variable that returns more information.
+    * 
+-   * @return API_SUCCESS(1) or API_FAILURE (0 - check status)
++   * @return API_SUCCESS or API_FAILURE (check status)
+    */
+   int (*release)(sca_status_t* status);
+   
+@@ -501,18 +563,37 @@ typedef struct
+    * pre-registered to perform the validation. 
+    * The caller manages the memory and MUST assure the memory is intact until
+    * the function returns.
+-   * This function only returns API_VALRESULT_VALID and API_VALRESULT_INVALID.
+-   * In case of erorrs API_VALRESULT_INVALID will be returned with an error code
+-   * passed in the status flag. This flag also contains more details about the 
+-   * validation status (why invalid, etc.)
++   * This function returns API_VALRESULT_VALID, API_VALRESULT_INVALID, and
++   * API_VALIDATION_ERROR.
++   * 
++   * In contrast to previous implementations beginning with version 0.3.0.0 the
++   * result MUST be API_VALIDATION_ERROR as soon as one error bit is set in the
++   * status. Otherwise the result must be either API_VALRESULT_VALID or 
++   * API_VALRESULT_INVALID.
++   * 
++   * In case none of the provided signature blocks is supported the plug-in MUST
++   * set the status flag API_STATUS_ERR_UNSUPPPORTED_ALGO and return 
++   * API_VALIDATION_ERROR. This allows the caller to perform all necessary 
++   * actions specified in the BGPsec draft validation section. 
++   * 
++   * Situations where the the correct key cannot be located are NOT considered
++   * errors, these situations MUST result in API_VALRESULT_INVALID. Situations
++   * of invalid keys cannot occur because keys MUST be checked of their validity
++   * during registration.
++   *
++   * For validation results API_VALRESULT_VALID and API_VALRESULT_INVALID the
++   * status flag can contain more detailed information about the reason for 
++   * the validation status (why invalid, etc.). 
++   * 
++   * These are coded as API_STATUS_INFO_... types.
+    *
+    * @param data This structure contains all necessary information to perform
+    *             the path validation. The status flag will contain more 
+    *             information
+    *
+-   * @return API_VALRESULT_VALID (1) or API_VALRESULT_INVALID (0) and the status 
+-   *         flag contains further information - including errors.
+-   *         
++   * @return API_VALRESULT_VALID, API_VALRESULT_INVALID,
++   *         or API_VALIDATION_ERROR (check status) and the status flag 
++   *         contains further information - including errors.
+    */
+   int (*validate)(SCA_BGPSecValidationData* data);
+    
+@@ -520,14 +601,33 @@ typedef struct
+    * Sign the given BGPsec data using the key information (ski, algo-id, asn)
+    * provided within the BGPSecSignData object.
+    *
+-   * @param bgpsec_data The data object to be signed. This also includes the
+-   *                    generated signature.
+-   * @param ski The ski of the key to be used.
++   * If all signings could be performed without any problems, the API MUST 
++   * return API_SUCCESS. 
++   * 
++   * As soon as one signing encountered issues, the return value MUST be
++   * API_FAILURE and the status flag indicates the error for each provided data
++   * object. 
++   * In case the status flag has one error bit set (use the bit arithmetic with 
++   * the mask SCA_API_STATUS_ERROR_MASK). The signing is considered as failed 
++   * and the signature values are not to be used. They MUST be NULL.
++   * 
++   * API_FAILURE must not be returned if none of the provided data objects has
++   * no error bit(s) set. API_SUCCESS must not be returned if at least one
++   * data object had an error bit set.
++   * 
++   * Unsupported algorithm results in the unsupported error bit being set and 
++   * the return value API_FAILURE. 
++   *
++   * Here in contrast to verifications a missing key is considered an error.
++   * 
++   * @param count The number of bgpsec_data elements in the given array
++   * @param bgpsec_data Array containing the data objects to be signed. This 
++   *                    also includes the generated signature.
+    *
+-   * @return API_SUCCESS (0) or API_FAILURE (1)
++   * @return API_SUCCESS or API_FAILURE (check status)
+    * 
+    */
+-  int (*sign)(SCA_BGPSecSignData* bgpsec_data);
++  int (*sign)(int count, SCA_BGPSecSignData** bgpsec_data);
+ 
+   /**
+    * Register the private key. This method allows to register the
+@@ -535,22 +635,28 @@ typedef struct
+    * The memory is NOT shared for longer than the registration execution cycle.
+    * NOTE: The key information MUST be copied within the API.
+    *
++   * IMPORTANT:
++   *   To detect duplicate keys only the ASN, SKI, and algoID are to be used.
++   *
+    * @param key The key itself - MUST contain the DER encoded key.
+    * @param status Will contain the status information of this call.
+    *
+-   * @return API_SUCCESS(1) or API_FAILURE(0 - check status)
++   * @return API_SUCCESS or API_FAILURE (check status)
+    */
+   u_int8_t (*registerPrivateKey)(BGPSecKey* Key, sca_status_t* status);
+ 
+   /**
+    * Remove the registration of a given key with the specified key ID. 
+    *
+-   * @param key The key needs at least contain the ASN and SKI.
++   * @param asn The ASN of the private key (network format).
++   * @param ski The 20 Byte ski
++   * @param algoID The algorithm ID of the key.
+    * @param status Will contain the status information of this call.
+    *
+-   * @return API_SUCCESS(1) or API_FAILURE(0 - check status)
++   * @return API_SUCCESS or API_FAILURE (check status)
+    */
+-  u_int8_t (*unregisterPrivateKey)(BGPSecKey* ski, sca_status_t* status);
++  u_int8_t (*unregisterPrivateKey)(u_int32_t asn, u_int8_t* ski, 
++                                   u_int8_t algoID, sca_status_t* status);
+ 
+   /**
+    * Register the public key.
+@@ -560,24 +666,64 @@ typedef struct
+    * 
+    * NOTE: The key information MUST be copied within the API.
+    *
++   * Also the DER format of the key MUST match the algorithm ID or an invalid
++   * key error must be set in the status flag.
++   * 
++   * IMPORTANT:
++   *   To detect duplicate keys the source, ASN, SKI, and the binary DER 
++   *   formated key must match. (RFC 8210 - does not use specifically the 
++   *   algorithm id but the algorithm ID is identified by the DER formated key.)
++   *
+    * @param key The key itself - MUST contain the DER encoded key.
++   * @param source The source of the key.
+    * @param status Will contain the status information of this call.
+    *
+-   * @return API_SUCCESS(1) or API_FAILURE(0 - check status)
++   * @return API_SUCCESS or API_FAILURE (check status)
+    */
+-  u_int8_t (*registerPublicKey)(BGPSecKey* key, sca_status_t* status);
++  u_int8_t (*registerPublicKey)(BGPSecKey* key, sca_key_source_t source,
++                                sca_status_t* status);
+ 
+   /**
+    * Remove the registered key with the same ski and asn. (Optional)
+    * This method allows to remove a particular key that is registered for the
+    * given SKI and ASN.
+    *
++   * IMPORTANT: If only the SKI and ASN are provided, all keys matching the ASN 
++   *            and SKI will be deleted (from the given source). 
++   *            This is important for cases of SKI collision.
++   * 
+    * @param key The key needs at least contain the ASN and SKI.
++   * @param source The source of the key.
+    * @param status Will contain the status information of this call.
+    *
+-   * @return API_SUCCESS(1) or API_FAILURE(0 - check status)
++   * @return API_SUCCESS or API_FAILURE (check status)
+    */
+-  u_int8_t (*unregisterPublicKey)(BGPSecKey* key, sca_status_t* status);
++  u_int8_t (*unregisterPublicKey)(BGPSecKey* key, sca_key_source_t source,
++                                  sca_status_t* status);
++  
++  /**
++   * Remove all public keys from the internal storage that were provided by the 
++   * given key source.
++   * 
++   * @param source The source of the keys.
++   * @param status Will contain the status information of this call.
++   * 
++   * @return API_SUCCESS or API_FAILURE (check status)
++   * 
++   * @since 0.3.0.0
++   */
++  u_int8_t (*cleanKeys)(sca_key_source_t source, sca_status_t* status);
++
++  /**
++   * Remove all private keys from the internal storage.
++   * 
++   * @param status Will contain the status information of this call.
++   * 
++   * @return API_SUCCESS or API_FAILURE (check status)
++   * 
++   * @since 0.3.0.0
++   */
++  u_int8_t (*cleanPrivateKeys)(sca_status_t* status);
+   
+   /**
+    * In case the validation method does return the generated hashMessage, this
+@@ -611,7 +757,7 @@ typedef struct
+   int (*getDebugLevel)();
+ 
+   /**
+-   * Set the new debug level going forward. This methid returns the previous set 
++   * Set the new debug level going forward. This method returns the previous set 
+    * debug level or -1 if not supported.
+    * 
+    * @param debugLevel The debug level to be set - Follows system debug values.
+@@ -620,6 +766,17 @@ typedef struct
+    */
+   int (*setDebugLevel)(int debugLevel);  
+   
++  /**
++   * Allows to query if this plug-in supports the requested algorithm IDdd.
++   * 
++   * @param algoID The algorithm ID.
++   * 
++   * @return true if the algorithm is supported or not.
++   * 
++   * @since 0.3.0.0
++   */
++  bool (*isAlgorithmSupported)(u_int8_t algoID);
++  
+ } SRxCryptoAPI;
+ 
+ /* Function Declaration */
+@@ -632,7 +789,7 @@ typedef struct
+  * @param api the api object.
+  * @param status an OUT variable that contains status information.
+  * 
+- * @return API_SUCCESS(1) or API_FAILURE(0 - see status) 
++ * @return API_SUCCESS or API_FAILURE (see status) 
+  */
+ int srxCryptoInit(SRxCryptoAPI* api, sca_status_t* status);
+ 
+@@ -642,7 +799,7 @@ int srxCryptoInit(SRxCryptoAPI* api, sca
+  * 
+  * @param api Unbind the SRxCryptoAPI
+  *
+- * @return API_SUCCESS(1) or API_FAILURE(0 - see status) 
++ * @return API_SUCCESS or API_FAILURE (see status) 
+  */
+ int srxCryptoUnbind(SRxCryptoAPI* api, sca_status_t* status);
+ 
+@@ -683,7 +840,7 @@ int sca_generateHashMessage(SCA_BGPSecVa
+  * 
+  * @return Return the hash message.
+  */
+-SCA_HashMessage* sca_gnenerateOriginHashMessage(u_int32_t targetAS, 
++SCA_HashMessage* sca_generateOriginHashMessage(u_int32_t targetAS, 
+                                             SCA_BGPSEC_SecurePathSegment* spSeg, 
+                                             SCA_Prefix* nlri, u_int8_t algoID);
+ 
+@@ -699,7 +856,7 @@ bool sca_freeHashInput(SCA_HashMessage*
+ /**
+  * This function sets the key path.
+  *
+- * @return API_SUCCESS(1) or API_FAILURE(0) 
++ * @return API_SUCCESS or API_FAILURE 
+  *
+  */
+ int sca_SetKeyPath (char* key_path);
+@@ -728,7 +885,7 @@ char* sca_FindDirInSKI (char* filenamebu
+  * @param status The status information - The status flag will NOT be 
+  *                                        initialized.
+  *
+- * @return API_SUCCESS(1) or API_FAILURE(0 - see status) 
++ * @return API_SUCCESS or API_FAILURE (see status) 
+  */
+ int sca_loadKey(BGPSecKey* key, bool fPrivate, sca_status_t* status);
+ 
+@@ -737,7 +894,7 @@ int sca_loadKey(BGPSecKey* key, bool fPr
+  * 
+  * @param key_ext The file extension
+  * 
+- * @return API_SUCCESS(1) or API_FAILURE(0) 
++ * @return API_SUCCESS or API_FAILURE 
+  * 
+  * @since 0.1.2.0
+  */
+@@ -749,14 +906,14 @@ int sca_setDER_ext (char* key_ext);
+  * 
+  * @param x509_ext The file extension
+  * 
+- * @return API_SUCCESS(1) or API_FAILURE(0) 
++ * @return API_SUCCESS or API_FAILURE 
+  * 
+  * @since 0.1.2.0
+  */
+ int sca_setX509_ext (char* x509_ext);
+ 
+ /**
+- * Writes the loging information.
++ * Writes the logging information.
+  *
+  * @param level The logging level
+  * @param format The format of the logging info
+@@ -776,7 +933,7 @@ long sca_getCurrentLogLevel();
+ /**
+  * Print the status information in human readable format
+  * 
+- * @param status
++ * @param status The status to be printed
+  * 
+  * @since 0.2.0.0
+  */
+@@ -792,4 +949,23 @@ void sca_printStatus(sca_status_t status
+  * @since 0.2.0.0
+  */
+ u_int8_t sca_getAlgorithmID(SCA_HashMessage* hashMessage);
++
++/**
++ * Return the algorithm ID's from the BGPsec_PATH attribute. It is possible 
++ * that no signature block can be found within a iBGP announced update.
++ * 
++ * The pointers algoID1 and algoID2 are return values if not NULL.
++ * 
++ * @param attr the bgpsec algorithm ID
++ * @param status The status information - The status flag will NOT be 
++ *                                        initialized.
++ * @param algoID1 The algorithm ID of signature block one or 0 if not found. 
++ * @param algoID2 The algorithm ID of signature block two or 0 if not found.
++ * 
++ * @return API_SUCCESS or API_FAILURE
++ * 
++ * @since 0.3.0.0
++ */
++u_int8_t sca_getAlgorithmIDs(SCA_BGP_PathAttribute* attr, sca_status_t* status,
++                             u_int8_t* algoID1, u_int8_t* algoID2);
+ #endif /* _SRXCRYPTOAPI_H*/
+\ No newline at end of file
+--- /opt/project/NIST-BGP-SRx/srx-crypto-api/./srxcryptoapi.c	2020-05-07 12:52:09.913785252 -0400
++++ ./srxcryptoapi.c	2017-11-28 16:52:55.000000000 -0500
+@@ -25,10 +25,18 @@
+  * that do generate the key files in the required form. See the tool sub
+  * directory for more information.
+  *
+- * @version 0.2.0.3
++ * @version 0.3.0.0
+  * 
+  * ChangeLog:
+  * -----------------------------------------------------------------------------
++ *  0.3.0.0 - 2017/08/18 - oborchert
++ *            * Added function cleanPrivateKeys
++ *            * Added missing wrapper functions
++ *            * Fixed speller in function name sca_generateOriginHashMessage
++ *          - 2017/08/15 - oborchert
++ *            * Updated the following methods to reflect API changes:
++ *              wrap_sign, wrap_registerPrivateKey, wrap_unregisterPrivateKey,
++ *              wrap_registerPublicKey, wrap_unregisterPublicKey
+  *  0.2.0.3 - 2017/06/05 - oborchert
+  *            *  Added missing default mapping to api->setDebugLevel and 
+  *               api->getDebugLevel
+@@ -143,6 +151,11 @@
+ #define SCA_REGISTER_PUBLIC_KEY    "method_registerPublicKey"
+ #define SCA_UNREGISTER_PUBLIC_KEY  "method_unregisterPublicKey"
+ 
++#define SCA_CLEAN_KEYS             "method_cleanKeys"
++#define SCA_CLEAN_PRIVATE_KEYS     "method_cleanPrivateKeys"
++
++#define SCA_IS_ALGO_SUPPORTED      "method_isAlgorithmSupported"
++
+ #define SCA_DEF_INIT                   "init"
+ #define SCA_DEF_RELEASE                "release"
+ 
+@@ -152,6 +165,8 @@
+ #define SCA_DEF_GET_DEBUGLEVEL         "getDebugLevel"
+ #define SCA_DEF_SET_DEBUGLEVEL         "setDebugLevel"
+ 
++#define SCA_DEF_IS_ALGO_SUPPORTED      "isAlgorithmSupported"
++
+ #define SCA_DEF_SIGN                   "sign"
+ #define SCA_DEF_VALIDATE               "validate"
+ 
+@@ -161,6 +176,9 @@
+ #define SCA_DEF_REGISTER_PUBLIC_KEY    "registerPublicKey"
+ #define SCA_DEF_UNREGISTER_PUBLIC_KEY  "unregisterPublicKey"
+ 
++#define SCA_DEF_CLEAN_KEYS             "cleanKeys"
++#define SCA_DEF_CLEAN_PRIVATE_KEYS     "cleanPrivateKeys"
++
+ #ifndef SYSCONFDIR
+ #define SYSCONFDIR               "/etc"
+ #endif // SYSCONFDIR
+@@ -181,6 +199,8 @@ typedef struct {
+   const char* str_method_getDebugLevel;
+   const char* str_method_setDebugLevel;
+   
++  const char* str_method_isAlgorithmSupported;
++  
+   const char* str_method_sign;
+   const char* str_method_validate;
+ 
+@@ -189,6 +209,10 @@ typedef struct {
+   
+   const char* str_method_registerPublicKey;
+   const char* str_method_unregisterPublicKey;
++  
++  const char* str_method_cleanKeys;
++  const char* str_method_cleanPrivateKeys;
++  
+ } SCA_Mappings;
+ 
+ // Hash struct for first signature in path
+@@ -325,12 +349,27 @@ bool wrap_freeHashMessage(SCA_HashMessag
+   }
+   
+   /**
++   * Set the new debug level going forward. This method returns the previous set 
++   * debug level or -1 if not supported.
++   * 
++   * @param debugLevel The debug level to be set - Follows system debug values.
++   * 
++   * @return false (not supported)
++   */
++  bool wrap_isAlgorithmSupported(u_int8_t algoID)
++  {
++    sca_debugLog (LOG_DEBUG, "Called local test wrapper "
++                             "'wrap_isAlgorithmSupported'\n");
++    return false;    
++  }  
++  
++  /**
+    * Perform BGPSEC path validation. This function required the keys to be 
+    * pre-registered to perform the validation. 
+    * The caller manages the memory and MUST assure the memory is intact until
+    * the function returns.
+    * This function only returns API_VALRESULT_VALID and API_VALRESULT_INVALID.
+-   * In case of erorrs API_VALRESULT_INVALID will be returned with an error code
++   * In case of errors API_VALRESULT_INVALID will be returned with an error code
+    * passed in the status flag. This flag also contains more details about the 
+    * validation status (why invalid, etc.)
+    *
+@@ -361,30 +400,35 @@ int wrap_validate(SCA_BGPSecValidationDa
+  * This is the internal wrapper function. Currently it does return only the
+  * error code and provides a debug log.
+  *
+- * @param bgpsec_path The BGPSEC Path Segment
+- * @param number_keys The number of keys provided
+- * @param keys The array of keys
+- * @param prefix pointer to the prefix.
+- * @param localAS the callers local AS number.
++ * API_STATUS_ERR_UNSUPPPORTED_ALGO: Data is provided but NO algorithm is 
++ *                                   supported.
++ * 
++ * @param count The number of bgpsec_data elements in the given array
++ * @param bgpsec_data Array containing the data objects to be signed. This 
++ *                    also includes the generated signature.
++ *
++ * @return API_FAILURE
+  *
+- * @return API_VALRESULT_INVALID -> status = API_STATUS_ERR_USER1
+  */
+-int wrap_sign(SCA_BGPSecSignData* data)
++ int wrap_sign(int count, SCA_BGPSecSignData** bgpsec_data)
+ {
+   // Return an error for missing implementation.
+   sca_debugLog (LOG_DEBUG, "Called local test wrapper 'sign'\n");
+-  if (data != NULL)
++  if (bgpsec_data != NULL)
+   {
+-    data->status = API_STATUS_INFO_KEY_NOTFOUND
+-                   | API_STATUS_ERR_INVLID_KEY            
+-                   | API_STATUS_ERR_KEY_IO;
++    int idx = 0;
++    for (idx = 0; idx < count; idx++)
++    {
++      bgpsec_data[idx]->status = API_STATUS_ERR_UNSUPPPORTED_ALGO;
+   }
++  }
++  
+   return API_FAILURE;
+ }
+ 
+ /**
+  * Register the private key. This method does not store the key. the return
+- * value is 0
++ * value is API_FAILURE.
+  *
+  * @param key The key to be stored
+  * @param status Will contain the status information of this call.
+@@ -406,23 +450,29 @@ u_int8_t wrap_registerPrivateKey(BGPSecK
+ }
+ 
+ /**
+- * Unregister the Private key. This method actually does not register unregister
+- * the private key. It returns 0
++ * Unregister the Private key. This method actually does not unregister
++ * the private key. The return value is API_FAILURE.
+  *
+- * @param key The key needs at least contain the ASN and SKI.
++   * @param asn The ASN of the private key (network format).
++   * @param ski The 20 Byte ski
++   * @param algoID The algorithm ID of the key.
+  * @param status Will contain the status information of this call.
+  *
+- * @return API_FAILURE - check status
++   * @return API_SUCCESS or API_FAILURE (check status)
+  */
+-u_int8_t wrap_unregisterPrivateKey(BGPSecKey* key, sca_status_t* status)
++u_int8_t wrap_unregisterPrivateKey(u_int32_t asn, u_int8_t* ski, 
++                                   u_int8_t algoID, sca_status_t* status)
+ {
+   // Return an error for missing implementation.
+   sca_debugLog (LOG_DEBUG, "Called local test wrapper "
+                            "'unregisterPrivateKey'\n");
+   if (status != NULL)
+   {
+-    *status =  API_STATUS_ERR_KEY_IO
+-              | API_STATUS_INFO_KEY_NOTFOUND;
++    *status = API_STATUS_ERR_UNSUPPPORTED_ALGO;
++    if (ski == NULL)
++    {
++      *status |= API_STATUS_ERR_NO_DATA;
++    }
+   }
+ 
+   return API_FAILURE;
+@@ -430,52 +480,113 @@ u_int8_t wrap_unregisterPrivateKey(BGPSe
+ 
+ /**
+  * Register the public key. This method does not store the key. the return
+- * value is 0
++ * value is API_FAILURE.
++ *
++ * API_STATUS_ERR_UNSUPPPORTED_ALGO: Algorithm not supported
++ * API_STATUS_ERR_NO_DATA: No key was provided
+  *
+  * @param key The key to be stored
++ * @param source The source of the key.
+  * @param status Will contain the status information of this call.
+  *
+- * @return API_FAILURE - check status
++ * @return API_FAILURE (check status)
+  */
+-u_int8_t wrap_registerPublicKey(BGPSecKey* key, sca_status_t* status)
++u_int8_t wrap_registerPublicKey(BGPSecKey* key, sca_key_source_t source,
++                                sca_status_t* status)
+ {
+   // Return an error for missing implementation.
+   sca_debugLog (LOG_DEBUG, "Called local test wrapper 'registerPublicKey'\n");
+   if (status != NULL)
+   {
+-    *status =   API_STATUS_ERR_INSUF_KEYSTORAGE 
+-              | API_STATUS_ERR_INVLID_KEY 
+-              | API_STATUS_ERR_KEY_IO;
++    *status = API_STATUS_ERR_UNSUPPPORTED_ALGO;
++    if (key == NULL)
++    {
++      *status |= API_STATUS_ERR_NO_DATA;
++    }      
+   }
+ 
+   return API_FAILURE;
+ }
+ 
+ /**
+- * Unregister the Private key. This method actually does not register unregister
+- * the private key. It returns 0
++ * Unregister the Private key. This method actually does not unregister
++ * the private key. The return value is API_FAILURE.
++ *
++ * API_STATUS_ERR_UNSUPPPORTED_ALGO: Algorithm not supported
++ * API_STATUS_ERR_NO_DATA: No key was provided
+  *
+  * @param keyID The key id to unregister.
++ * @param source The source of the key.
+  * @param status Will contain the status information of this call.
+  *
+  * @return API_FAILURE - check status
+  */
+-u_int8_t wrap_unregisterPublicKey(BGPSecKey* key, sca_status_t* status)
++u_int8_t wrap_unregisterPublicKey(BGPSecKey* key, sca_key_source_t source,
++                                  sca_status_t* status)
+ {
+   // Return an error for missing implementation.
+   sca_debugLog (LOG_DEBUG, "Called local test wrapper 'unregisterPublicKey'\n");
+   
+   if (status != NULL)
+   {
+-    // Just set all errors
+-    *status =   API_STATUS_INFO_KEY_NOTFOUND
+-              | API_STATUS_ERR_KEY_IO;
++    *status = API_STATUS_ERR_UNSUPPPORTED_ALGO;
++    if (key == NULL)
++    {
++      *status |= API_STATUS_ERR_NO_DATA;
++    }      
+   }
+ 
+   return API_FAILURE;
+ }
+ 
+ /**
++ * Remove all public keys from the internal storage that were provided by the 
++ * given key source. This function returns API_SUCCESS
++ * 
++ * @param source The source of the keys.
++ * @param status Will contain the status information of this call.
++ * 
++ * @return API_SUCCESS
++ * 
++ * @since 0.3.0.0
++ */
++u_int8_t wrap_cleanKeys(sca_key_source_t source, sca_status_t* status)
++{
++  // Return an error for missing implementation.
++  sca_debugLog (LOG_DEBUG, "Called local test wrapper 'cleanKeys'\n");  
++  
++  if (status != NULL)
++  {
++    *status = API_STATUS_OK;
++  }
++  
++  return API_SUCCESS;
++}
++
++/**
++ * Remove all private keys from the internal storage. This function returns 
++ * API_SUCCESS
++ * 
++ * @param status Will contain the status information of this call.
++ * 
++ * @return API_SUCCESS
++ * 
++ * @since 0.3.0.0
++ */
++u_int8_t wrap_cleanPrivateKeys(sca_status_t* status)
++{
++  // Return an error for missing implementation.
++  sca_debugLog (LOG_DEBUG, "Called local test wrapper 'cleanPrivateKeys'\n");  
++  
++  if (status != NULL)
++  {
++    *status = API_STATUS_OK;
++  }
++  
++  return API_SUCCESS;
++}
++
++/**
+  * Look if the configuration file is specified and if not, attempt to load the
+  * default one in the system configuration folder or the current folder.
+  *
+@@ -634,13 +745,15 @@ static void _loadMapping(config_setting_
+                      &mappings->str_method_freeSignature);
+ 
+   //////////////////////////////////////////////////////////////////////////////
+-  // LOAD DEBUG FUNCTIONS
++  // LOAD DEBUG AND HELPER FUNCTIONS
+   //////////////////////////////////////////////////////////////////////////////  
+   __readMapping(set, SCA_GET_DEBUGLEVEL, 
+                      &mappings->str_method_getDebugLevel);
+   __readMapping(set, SCA_SET_DEBUGLEVEL, 
+                      &mappings->str_method_setDebugLevel);
+   
++  __readMapping(set, SCA_IS_ALGO_SUPPORTED, 
++                     &mappings->str_method_isAlgorithmSupported);
+   
+   //////////////////////////////////////////////////////////////////////////////
+   // SIGN / VALIDATE FUNCTIONS
+@@ -648,22 +761,23 @@ static void _loadMapping(config_setting_
+   __readMapping(set, SCA_SIGN, &mappings->str_method_sign);
+   __readMapping(set, SCA_VALIDATE, &mappings->str_method_validate);
+   
+-  
+   //////////////////////////////////////////////////////////////////////////////
+-  // PRIVATE KEY STORAGE
++  // KEY STORAGE
+   //////////////////////////////////////////////////////////////////////////////
+   __readMapping(set, SCA_REGISTER_PRIVATE_KEY,
+                      &mappings->str_method_registerPrivateKey);
+   __readMapping(set, SCA_UNREGISTER_PRIVATE_KEY,
+                      &mappings->str_method_unregisterPrivateKey);
+ 
+-  //////////////////////////////////////////////////////////////////////////////
+-  // EXTENDED - validation and public key storage
+-  //////////////////////////////////////////////////////////////////////////////
+   __readMapping(set, SCA_REGISTER_PUBLIC_KEY,
+                      &mappings->str_method_registerPublicKey);
+   __readMapping(set, SCA_UNREGISTER_PUBLIC_KEY,
+                      &mappings->str_method_unregisterPublicKey);
++  
++  __readMapping(set, SCA_CLEAN_KEYS, 
++                     &mappings->str_method_cleanKeys);
++  __readMapping(set, SCA_CLEAN_PRIVATE_KEYS, 
++                     &mappings->str_method_cleanPrivateKeys);
+ }
+ 
+ /**
+@@ -779,6 +893,16 @@ static int _mapAPI(SCA_Mappings* mapping
+                     mappings->str_method_freeSignature, 
+                     SCA_DEF_FREE_SIGNATURE);    
+ 
++    __doMapFunction(api->libHandle, (void**)&api->setDebugLevel,
++                    mappings->str_method_setDebugLevel,
++                    SCA_DEF_SET_DEBUGLEVEL);
++    __doMapFunction(api->libHandle, (void**)&api->getDebugLevel,
++                    mappings->str_method_getDebugLevel,
++                    SCA_DEF_GET_DEBUGLEVEL);
++    
++    __doMapFunction(api->libHandle, (void**)&api->isAlgorithmSupported,
++                    mappings->str_method_isAlgorithmSupported,
++                    SCA_DEF_IS_ALGO_SUPPORTED);
+     
+     __doMapFunction(api->libHandle, (void**)&api->sign,
+                     mappings->str_method_sign, SCA_DEF_SIGN);
+@@ -799,12 +923,13 @@ static int _mapAPI(SCA_Mappings* mapping
+                     mappings->str_method_unregisterPrivateKey,
+                     SCA_DEF_UNREGISTER_PRIVATE_KEY);
+     
+-    __doMapFunction(api->libHandle, (void**)&api->setDebugLevel,
+-                    mappings->str_method_setDebugLevel,
+-                    SCA_DEF_SET_DEBUGLEVEL);
+-    __doMapFunction(api->libHandle, (void**)&api->getDebugLevel,
+-                    mappings->str_method_getDebugLevel,
+-                    SCA_DEF_GET_DEBUGLEVEL);
++    __doMapFunction(api->libHandle, (void**)&api->cleanKeys,
++                    mappings->str_method_cleanKeys,
++                    SCA_DEF_CLEAN_KEYS);
++    
++    __doMapFunction(api->libHandle, (void**)&api->cleanPrivateKeys,
++                    mappings->str_method_cleanPrivateKeys,
++                    SCA_DEF_CLEAN_PRIVATE_KEYS);    
+   }
+ 
+   return retVal;
+@@ -871,6 +996,11 @@ int srxCryptoInit(SRxCryptoAPI* api, sca
+   api->freeHashMessage      = wrap_freeHashMessage;
+   api->freeSignature        = wrap_freeSignature;
+   
++  api->setDebugLevel        = wrap_setDebugLevel;
++  api->getDebugLevel        = wrap_getDebugLevel;
++  
++  api->isAlgorithmSupported = wrap_isAlgorithmSupported;
++  
+   api->sign                 = wrap_sign;
+   api->validate             = wrap_validate;
+ 
+@@ -880,8 +1010,8 @@ int srxCryptoInit(SRxCryptoAPI* api, sca
+   api->registerPrivateKey   = wrap_registerPrivateKey;
+   api->unregisterPrivateKey = wrap_unregisterPrivateKey;
+   
+-  api->setDebugLevel        = wrap_setDebugLevel;
+-  api->getDebugLevel        = wrap_getDebugLevel;
++  api->cleanKeys            = wrap_cleanKeys;
++  api->cleanPrivateKeys     = wrap_cleanPrivateKeys;
+ 
+   // Now initialize mapping names
+   mappings = malloc(sizeof(SCA_Mappings));
+@@ -1191,7 +1321,7 @@ void sca_debugLog( int level, const char
+  * @param status The status information - The status flag will NOT be 
+  *                                        initialized.
+  *
+- * @return API_SUCCESS(1) or API_FAILURE(0 - see status) 
++ * @return API_SUCCESS or API_FAILURE (see status) 
+  */
+ int sca_loadKey(BGPSecKey* key, bool fPrivate, sca_status_t* status)
+ {
+@@ -1318,7 +1448,7 @@ int sca_generateHashMessage(SCA_BGPSecVa
+   bgpsecPathAttr += sizeof(SCA_BGP_PathAttribute);
+   // Contains the length of SecurePath and all Signature blocks.
+   u_int16_t remainder = 0;
+-  if ((bgpsecAttrHdr->flags & BGP_UPD_A_FLAGS_EXT_LENGTH) == 0)
++  if ((bgpsecAttrHdr->flags & SCA_BGP_UPD_A_FLAGS_EXT_LENGTH) == 0)
+   {
+     remainder = *bgpsecPathAttr;
+     bgpsecPathAttr++;
+@@ -1571,7 +1701,7 @@ int sca_generateHashMessage(SCA_BGPSecVa
+  * 
+  * @return Return the hash message.
+  */
+-SCA_HashMessage* sca_gnenerateOriginHashMessage(u_int32_t targetAS, 
++SCA_HashMessage* sca_generateOriginHashMessage(u_int32_t targetAS, 
+                                             SCA_BGPSEC_SecurePathSegment* spSeg, 
+                                             SCA_Prefix* nlri, u_int8_t algoID)
+ {
+@@ -1620,7 +1750,7 @@ SCA_HashMessage* sca_gnenerateOriginHash
+ #pragma GCC pop_options    
+ 
+ /**
+- * This function will free the copmlete digest structure if NOT owned by the 
++ * This function will free the complete digest structure if NOT owned by the 
+  * API.
+  * 
+  * @param data The validation data that contain the validation digest that
+@@ -1702,6 +1832,104 @@ u_int8_t sca_getAlgorithmID(SCA_HashMess
+ 
+ 
+ /**
++ * Return the algorithm ID's from the BGPsec_PATH attribute. It is possible 
++ * that no signature block can be found within a iBGP announced update.
++ * 
++ * @param attr the bgpsec algorithm ID
++ * @param status The status information - The status flag will NOT be 
++ *                                        initialized.
++ * @param algoID1 The algorithm ID of signature block one or 0 if not found. 
++ * @param algoID2 The algorithm ID of signature block two or 0 if not found.
++ * 
++ * @return API_SUCCESS or API_FAILURE
++ * 
++ * @since 0.3.0.0
++ */
++u_int8_t sca_getAlgorithmIDs(SCA_BGP_PathAttribute* attr, sca_status_t* status,
++                             u_int8_t* algoID1, u_int8_t* algoID2)
++{
++  u_int8_t retVal = API_SUCCESS;
++  sca_status_t myStatus = API_STATUS_OK;
++  u_int8_t algoID[SCA_MAX_SIGBLOCK_COUNT];
++  memset(algoID, 0, SCA_MAX_SIGBLOCK_COUNT);
++  SCA_BGPSEC_SecurePath*     secPath  = NULL;
++  SCA_BGPSEC_SignatureBlock* sigBlock = NULL;
++  u_int8_t* ptr = (u_int8_t*)attr;
++  u_int16_t remainder = 0;
++  int size     = 0;
++  int segments = 0;
++  int blockIdx = 0;
++  
++  if (attr != NULL)
++  {
++    if ((attr->flags & SCA_BGP_UPD_A_FLAGS_EXT_LENGTH) == 0)
++    {
++      SCA_BGPSEC_NormPathAttribute* norm = (SCA_BGPSEC_NormPathAttribute*)attr;
++      remainder  = norm->attrLength;
++      size = sizeof(SCA_BGPSEC_NormPathAttribute);
++    }
++    else
++    {
++      SCA_BGPSEC_ExtPathAttribute* ext = (SCA_BGPSEC_ExtPathAttribute*)attr;
++      remainder  = ntohs(ext->attrLength);
++      size = sizeof(SCA_BGPSEC_ExtPathAttribute);
++    }
++    ptr       += size;
++    remainder -= size;
++    
++    secPath = (SCA_BGPSEC_SecurePath*)ptr;
++    size  = ntohs(secPath->length);
++    segments = (size-2) / LEN_SECPATHSEGMENT;
++    // Now move to the beginning of the signature block.
++    ptr       += size;
++    remainder -= size;
++    // Now walk through the signature blocks
++    while (remainder > 0)
++    {
++      if (blockIdx < SCA_MAX_SIGBLOCK_COUNT)
++      {
++        sigBlock  = (SCA_BGPSEC_SignatureBlock*)ptr;
++        size      = ntohs(sigBlock->length);
++        ptr       += size;
++        remainder -= size;
++        algoID[blockIdx] = sigBlock->algoID;
++        blockIdx++;
++      }
++      else
++      {
++        myStatus |= API_STATUS_ERR_SYNTAX;
++        break;
++      }
++    }
++  }
++  else
++  {
++    myStatus |= API_STATUS_ERR_NO_DATA;
++  }
++  
++  // Now set the algorithm identifiers into the OUT variables.
++  if (algoID1 != NULL)
++  {
++    *algoID1 = algoID[0];
++  }
++  if (algoID2 != NULL)
++  {
++    *algoID1 = algoID[1];
++  }
++  
++  if (status != NULL)
++  {
++    *status |= myStatus;
++  }
++  
++  if ((myStatus & API_STATUS_ERROR_MASK) != 0)
++  {
++    retVal = API_FAILURE;
++  }
++  return retVal;
++}
++
++/**
+  * Print the status information in human readable format
+  * 
+  * @param status the status variable to be printed
+--- /opt/project/NIST-BGP-SRx/srx-crypto-api/./srx_api_test.c	2020-05-07 12:52:09.913785252 -0400
++++ ./srx_api_test.c	2017-11-27 15:17:52.000000000 -0500
+@@ -22,11 +22,16 @@
+  *
+  * File contains methods to test API.
+  * 
+- * @version 0.2.0.3
++ * @version 0.3.0.0
+  * 
+  * Changelog:
+  * -----------------------------------------------------------------------------
+- *   0.2.0.4 - 2017/09/12 - oborchert
++ *   0.3.0.0 - 2017/09/06 - oborchert
++ *             - Fixed missing type in static variable declaration.
++ *           - 2017/08/17 - oborchert
++ *             - Removed structure KeyTester. API changed in such that it became 
++ *               obsolete for the task it was needed.
++ *   0.2.0.4 - 2017/09/12 - oborchert (merged from branch)
+  *             * Moved SCA 0.2.x into branch for further bugfixes. Trunk will
+  *               is different.
+  *             * Added missing integer type in static variable TEST_1
+@@ -77,9 +82,16 @@
+ 
+ #define TEST_1 1
+ #define TEST_2 2
++#define TEST_3 3
+ #define TEST_OK 0
+ #define TEST_FAILED 1
+ 
++/** The KEY source */
++#define TEST_KEY_SOURCE 1
++
++#define PRIV_KEY_NAME "private\0"
++#define PUB_KEY_NAME  "public\0"
++
+ /** Contains provided key specifications. */
+ typedef struct {
+   /** Determine if this spec is for a private or public key. */
+@@ -88,6 +100,8 @@ typedef struct {
+   u_int32_t asn;
+   /** the SKI of the key as hex string.*/
+   char      ski[STR_MAX];
++  /** the source of the key */
++  sca_key_source_t  source;
+   /** The algorithm ID of the key */
+   u_int8_t  algoID;
+ } KeySpec;
+@@ -98,18 +112,26 @@ typedef struct _st_list {
+   KeySpec keySpec;
+ } st_list;
+ 
+-/** This struct allows to reduce the code by assigning the requred public or 
+- * private function to the key management. */
+-typedef struct {
+-  u_int8_t(*registerKey)(BGPSecKey* key, sca_status_t* status);
+-  u_int8_t(*unregisterKey)(BGPSecKey* ski, sca_status_t* status);
+-} KeyTester;
+-
+ static st_list* keyList = NULL;
+ static int st_test = TEST_1;
+ 
+ /**
+- * Add the key specification to the list
++ * Return the static string "private" or "public"
++ * 
++ * @param isPrivate Indicates the requested key type 
++ * 
++ * @return PRIV_KEY_NAME of PUB_KEY_NAME
++ * 
++ * @since 0.3.0.0
++ */
++static char* _keyName(bool isPrivate)
++{
++  return isPrivate ? PRIV_KEY_NAME : PUB_KEY_NAME;
++}
++
++/**
++ * Add the key specification to the list using TEST_KEY_SOURCE as key source and
++ * SCA_ECDSA_ALGORITHM as algorithm ID.
+  * 
+  * @param ski the SKI
+  * @param isPrivate indicates if the key is private or not.
+@@ -124,6 +146,7 @@ static void pushKeySpec(char* priv, char
+   listElem->keySpec.asn = htonl(atoi(asn));
+   snprintf(listElem->keySpec.ski, STR_MAX, "%s", ski);
+   listElem->keySpec.isPrivate = strncmp(priv, "priv", 4) == 0;
++  listElem->keySpec.source    = TEST_KEY_SOURCE;
+   listElem->keySpec.algoID    = SCA_ECDSA_ALGORITHM;
+   
+   if (keyList == NULL)
+@@ -350,28 +373,68 @@ static void _setBGPSEcKey(BGPSecKey* key
+   }  
+ }
+ 
+-/** Test the keys by installing and un installing. 
+- * For best results, do NOT preload keys.
++/**
++ * Register the key specified in the keySpec parameter with the given SCA.
++ * 
++ * @param key The key itself
++ * @param keySpec The key specification
++ * @param api The SRxCryptoAPI
++ * @param status The status flag. (OUT PARAM)
++ * 
++ * @return API_SUCCESS or API_FAILURE
++ * 
++ * @since 0.3.0.0
++ */
++u_int8_t static __registerKey(BGPSecKey* key, KeySpec* keySpec, 
++                              SRxCryptoAPI* api, sca_status_t* status)
++{
++  return keySpec->isPrivate 
++         ? api->registerPrivateKey (key, status)
++         : api->registerPublicKey  (key, keySpec->source, status);
++}
++
++/**
++ * Un-register the key specified in the keySpec parameter with the given SCA.
+  * 
+- * @param key The BGPSEC Key (empty)
+- * @param keySpec The key specificatoin
+- * @param api points to the register and unregister fundtions
+- * @param privacyStr Contains "private" or "public" 
+- * @param status The status informtaion 
++ * @param key The key itself
++ * @param keySpec The key specification
++ * @param api The SRxCryptoAPI
++ * @param status The status flag. (OUT PARAM)
++ * 
++ * @return API_SUCCESS or API_FAILURE
++ * 
++ * @since 0.3.0.0
++ */
++u_int8_t static __unregisterKey(BGPSecKey* key, KeySpec* keySpec, 
++                                SRxCryptoAPI* api, sca_status_t* status)
++{
++  return keySpec->isPrivate 
++         ? api->unregisterPrivateKey(key->asn, key->ski, key->algoID, status)
++         : api->unregisterPublicKey(key, keySpec->source, status);
++}
++
++/** Test the keys by installing and un-installing.
++ * For best results, do NOT pre-load any keys.
++ * 
++ * @param key The BGPSEC Key
++ * @param keySpec The key specification
++ * @param api The mapped SRxCryptoAPI to be tested
++ * @param status The status information 
+  * 
+  * @return 0 if all went well, otherwise 1.
+  */
+-static int _doKeyTest_1(BGPSecKey* key, KeySpec* keySpec, KeyTester* api, 
++static int _doKeyTest_1(BGPSecKey* key, KeySpec* keySpec, SRxCryptoAPI* api, 
+                         char* keyName, sca_status_t* status)
+ {
+   int retVal = TEST_OK;
+   
+   // 1st try to store a key that does not provide DER key.
+   printf ("  - Register incomplete %s key...", keyName);
+-  if (api->registerKey(key, status) == API_SUCCESS)
++  if (__registerKey(key, keySpec, api, status) == API_SUCCESS)
+   {
+     printf ("failed - key stored!!\n"
+-            "WARNING: %s key without DER information stored!\n", keyName);
++            "WARNING: %s key without DER information stored!\n", 
++            _keyName(keySpec->isPrivate));
+     retVal = TEST_FAILED;
+   }
+   else
+@@ -380,9 +443,9 @@ static int _doKeyTest_1(BGPSecKey* key,
+   }
+   // 2nd have the crypto API load the key
+   sca_loadKey(key, keySpec->isPrivate, status);
+-  // 3rd have the crypto API loaded key register in the plugin
++  // 3rd have the crypto API loaded key register in the plug-in
+   printf ("  - Register complete %s key...", keyName);
+-  if (api->registerKey(key, status) != API_SUCCESS)
++  if (__registerKey(key, keySpec, api, status) != API_SUCCESS)
+   {
+     printf ("failed\n"
+             "WARNING: Could not store %s key.\n", keyName);
+@@ -392,7 +455,7 @@ static int _doKeyTest_1(BGPSecKey* key,
+   {
+     // - Now unregister
+     printf ("succes\n  - Unregister %s key...", keyName);
+-    if (api->unregisterKey(key, status) != API_SUCCESS)
++    if (__unregisterKey(key, keySpec, api, status) != API_SUCCESS)
+     {
+       printf ("failed\n"
+               "WARNING: could not unregister %s key.\n", keyName);
+@@ -408,26 +471,25 @@ static int _doKeyTest_1(BGPSecKey* key,
+ }
+ 
+ /** Test the keys by installing and un installing. 
+- * For best results, do NOT preload keys.
++ * For best results, do NOT pre-load keys.
+  * 
+- * @param key The BGPSEC Key (empty)
+- * @param keySpec The key specificatoin
+- * @param api points to the register and unregister fundtions
+- * @param privacyStr Contains "private" or "public" 
+- * @param status The status informtaion 
++ * @param keySpec The key specification
++ * @param api points to the SRxCryptoAPI implementation
++ * @param isPrivate indicates the type of key
++ * @param status The status information 
+  * 
+  * @return 0 if all went well, otherwise 1.
+  */
+-static int _doKeyTest_2(BGPSecKey* key, KeySpec* keySpec, KeyTester* api, 
++static int _doKeyTest_2(BGPSecKey* key, KeySpec* keySpec, SRxCryptoAPI* api, 
+                         char* keyName, sca_status_t* status)
+ {
+   int retVal =  TEST_OK;
+ 
+   sca_loadKey(key, keySpec->isPrivate, status);
+-  api->registerKey(key, status);
+-  api->registerKey(key, status);
+-  api->unregisterKey(key, status);
+-  api->unregisterKey(key, status);
++  __registerKey(key, keySpec, api, status);
++  __registerKey(key, keySpec, api, status);
++  __unregisterKey(key, keySpec, api, status);
++  __unregisterKey(key, keySpec, api, status);
+     
+   return retVal;
+ }
+@@ -465,12 +527,8 @@ int main(int argc, char** argv)
+       memset (&keySpec, 0, sizeof(KeySpec));
+       BGPSecKey key;
+       memset (&key, 0, sizeof(BGPSecKey));
+-      KeyTester keyTester;
+-      memset(&keyTester, 0, sizeof(KeyTester));
+ 
+       bool lastPrivate = true;
+-      keyTester.registerKey   = crypto->registerPrivateKey;
+-      keyTester.unregisterKey = crypto->unregisterPrivateKey;
+       char* keyName = "private";
+       
+       while (popKeySpec(&keySpec))
+@@ -478,19 +536,7 @@ int main(int argc, char** argv)
+       {
+         if (keySpec.isPrivate != lastPrivate)
+         {
+-          memset(&keyTester, 0, sizeof(keyTester));
+-          if (keySpec.isPrivate)
+-          {
+-            keyTester.registerKey   = crypto->registerPrivateKey;
+-            keyTester.unregisterKey = crypto->unregisterPrivateKey;
+-            keyName = "private";
+-          }
+-          else
+-          {
+-            keyTester.registerKey   = crypto->registerPublicKey;
+-            keyTester.unregisterKey = crypto->unregisterPublicKey;
+-            keyName = "public";
+-          }
++          keyName  = _keyName(keySpec.isPrivate);
+           lastPrivate = keySpec.isPrivate;
+         }
+         
+@@ -502,11 +548,11 @@ int main(int argc, char** argv)
+         {
+           case TEST_1 : 
+             printf ("Run TEST 1\n");
+-            _doKeyTest_1(&key, &keySpec, &keyTester, keyName , &status);
++            _doKeyTest_1(&key, &keySpec, crypto, keyName, &status);
+             break;
+           case TEST_2:
+             printf ("Run TEST 2\n");
+-            _doKeyTest_2(&key, &keySpec, &keyTester, keyName , &status);
++            _doKeyTest_2(&key, &keySpec, crypto, keyName , &status);
+             break;
+           default:
+             printf ("No test!\n");
+@@ -519,7 +565,6 @@ int main(int argc, char** argv)
+         }        
+         memset(&key, 0, sizeof(BGPSecKey));
+       }      
+-      memset(&keyTester, 0, sizeof(keyTester));
+     }
+     else
+     {
+--- /opt/project/NIST-BGP-SRx/srx-crypto-api/./bgpsec_openssl/key_storage.h	2020-05-07 12:52:09.907785261 -0400
++++ ./bgpsec_openssl/key_storage.h	2017-11-27 15:17:52.000000000 -0500
+@@ -73,6 +73,8 @@ typedef struct _KS_Key_Element
+   
+   /** The ASN of all the keys. */
+   u_int32_t   asn;
++  /** The key source. */
++  sca_key_source_t source;
+   /** The array containing the ASKI of the key. */
+   u_int8_t    ski[SKI_LENGTH];
+   /** An array containing the DER formated key - Normally contains only one key 
+@@ -143,32 +145,49 @@ void** ks_getKey(KeyStorage* storage, u_
+  * 
+  * @param storage The storage where the key is stored in
+  * @param key The BGPSecKey to be stored.
++ * @param source The source of the key.
+  * @param status an OUT value that provides more information.
+  * @param convert if true then convert the DER key into the EC_KEY
+  * 
+  * @return API_SUCESS if it could be stored, otherwise API_FAILED. 
+  */
+-int ks_storeKey(KeyStorage* storage, BGPSecKey* key, sca_status_t* status, 
+-                bool convert);
++int ks_storeKey(KeyStorage* storage, BGPSecKey* key, sca_key_source_t source,
++                sca_status_t* status, bool convert);
+ 
+ /**
+  * Delete the key from the given KeyStorage.
+  * 
+  * @param storage The storage where the key is stored in
+  * @param key The BGPSecKey to be stored.
++ * @param source The source of the key.
+  * @param status an OUT value that provides more information.
+  * 
+  * @return API_SUCESS if it could be stored, otherwise API_FAILED. 
+  */
+-int ks_delKey(KeyStorage* storage, BGPSecKey* key, sca_status_t* status);
++int ks_delKey(KeyStorage* storage, BGPSecKey* key, sca_key_source_t source,
++              sca_status_t* status);
+ 
+ /** 
+  * Free all Key Storage elements and *associated memory that was generated
+  * within the list.
++ * 
++ * @param storage The storage to be emptied
+  */
+ void ks_empty(KeyStorage* storage);
+ 
+ /**
++ * Remove all keys from the given source.
++ * 
++ * @param storage The storage from where the keys will be removed.
++ * @param source The source specifying the keys to be removed.
++ * 
++ * @return The number of keys that are removed.
++ * 
++ * @since 0.3.0.0
++ */
++int ks_removeSource(KeyStorage* storage, sca_key_source_t source);
++
++/**
+  * Empty the storage if necessary and free the allocated memory.
+  * 
+  * @param storage The storage to be freed.
+--- /opt/project/NIST-BGP-SRx/srx-crypto-api/./bgpsec_openssl/bgpsec_openssl.c	2020-05-07 12:52:09.906785262 -0400
++++ ./bgpsec_openssl/bgpsec_openssl.c	2017-11-27 15:17:52.000000000 -0500
+@@ -15,12 +15,30 @@
+  * DISCLAIM ANY LIABILITY OF ANY KIND FOR ANY DAMAGES WHATSOEVER RESULTING
+  * FROM THE USE OF THIS SOFTWARE.
+  *
+- * This plugin provides an OpenSSL ECDSA implementation for BGPSEC.
++ * This plug-in provides an OpenSSL ECDSA implementation for BGPSEC.
+  *
+- * @version 0.2.0.3
++ * @version 0.3.0.0
+  *
+  * ChangeLog:
+  * -----------------------------------------------------------------------------
++ *   0.3.0.0 - 2017/09/13 - oborchert
++ *             * Modified init in such that not finding the ski-list file during
++ *               init does NOT return an ERROR, it returns a USER INFO instead. 
++ *               This is a recoverable error, the caller can register the keys
++ *               in this case afterwards. -> Recoverable.
++ *           - 2017/09/06 - oborchert
++ *             * Fixed syntax error in return value of init method
++ *             * Added missing mappings to function comptest.
++ *           - 2017/08/18 - oborchert
++ *             * BZ1141: Fixed speller in API function name. Now reference to 
++ *               fixed name sca_generateOriginHashMessage
++ *           - 2017/08/17 - oborchert
++ *             * Added function comptest to allow compiler warnings if 
++ *               implementation does not match specification.
++ *           - 2017/08/16 - oborchert
++ *             * Update to comply with API version 0.3.0.0
++ *             * Added missing functions and modified implementation of existing 
++ *               one to include some functionality (except crypto)
+  *   0.2.0.3 - 2017/06/05 - oborchert
+  *             * Modified getDebugLevel to return the current used debug level.
+  *             * Moved some LOG_WARNING and LOG_INFO to LOG_DEBUG
+@@ -112,12 +130,16 @@ inline void printHex(int , unsigned char
+ /**
+  * Read the given file and pre-load all keys. The following non error status
+  * can be set:
++ * 
+  *   API_STATUS_INFO_KEY_NOTFOUND: One or more keys are not found
+- *   API_STATUS_ERR_KEY_IO: The key file was not found.
++ *   API_STATUS_ERR_KEY_IO: The key-list file was not found. The logging is set 
++ *                          to WARNING.
+  *
+  * This function is mainly used during initialization to allow pre-loading of
+  * keys.
+  *
++ * This function uses SCA_KSOURCE_INTERNAL as source value.
++ *
+  * @param fName The name of the file ('\0' terminated String)
+  * @param isPrivate indicate if the keys are private or public
+  * @param status Set the status flag in case of an ERROR of for INFO
+@@ -217,7 +239,8 @@ static void _readKeyFile(char* fName, bo
+ 
+           if (!isPrivate)
+           {
+-            if (ks_storeKey(BOSSL_pubKeys, &key, &myStatus, convert)
++            if (ks_storeKey(BOSSL_pubKeys, &key, SCA_KSOURCE_INTERNAL, 
++                            &myStatus, convert)
+                 != API_SUCCESS)
+             {
+               sca_debugLog(LOG_ERR, "Could not store private key!\n");
+@@ -227,7 +250,8 @@ static void _readKeyFile(char* fName, bo
+           }
+           else
+           {
+-            ks_storeKey(BOSSL_privKeys, &key, &myStatus, convert);
++            ks_storeKey(BOSSL_privKeys, &key, SCA_KSOURCE_INTERNAL, &myStatus, 
++                        convert);
+           }
+         }
+       }
+@@ -242,7 +266,7 @@ static void _readKeyFile(char* fName, bo
+   }
+   else
+   {
+-    sca_debugLog(LOG_ERR, "Cannot find key-list file '%s'\n", fName);
++    sca_debugLog(LOG_WARNING, "Cannot find key-list file '%s'\n", fName);
+     myStatus |= API_STATUS_ERR_KEY_IO;
+   }
+ 
+@@ -256,10 +280,13 @@ static void _readKeyFile(char* fName, bo
+  * The init method initialized the API. Only one failure can be imagined here,
+  * a consecutive call of the init method. Next to the specified error status
+  * values the following user values are provided:
++ * 
+  * API_STATUS_ERR_USER1:   The init method is called twice or more.
+  * API_STATUS_ERR_USER2:   The value parameter has invalid syntax.
+- * API_STATUS_INFO_USER1:  One or more public keys not found
+- * API_STATUS_ERR_KEY_IO:  Keyfile or private key not found
++ * 
++ * API_STATUS_INFO_KEY_NOTFOUND: One or more public keys not found
++ * API_STATUS_INFO_USER1: the private key init keyfile cannot be found.
++ * API_STATUS_INFO_USER2: the public key init keyfile cannot be found.
+  *
+  * In case value is not NULL it can contain the following string:
+  * <type>:<filename>[;<type>:<filename>;]
+@@ -275,12 +302,14 @@ static void _readKeyFile(char* fName, bo
+  * @param status An out parameter that will contain information in case of
+  *               failures.
+  *
+- * @return API_SUCCESS(1) or API_FAILURE(0 - see status)
++ * @return API_SUCCESS or API_FAILURE (see status)
+  *
+  * @since 0.1.2.0
+  */
+ int init(const char* value, int logLevel, sca_status_t* status)
+ {
++  int retVal = API_SUCCESS;
++  
+   // Just to be compliant with the specification
+   char* warning = \
+         "+--------------------------------------------------------------+\n" \
+@@ -295,8 +324,7 @@ int init(const char* value, int logLevel
+         "+--------------------------------------------------------------+\n";
+   printf ("%s", warning);
+ 
+-  sca_status_t myStatus = BOSSL_initialized ? API_STATUS_ERR_USER1
+-                                            : API_STATUS_OK;
++  sca_status_t myStatus = API_STATUS_OK;
+ 
+   if (!BOSSL_initialized)
+   {
+@@ -313,6 +341,7 @@ int init(const char* value, int logLevel
+ 
+     while (strLen > 0 && ((myStatus & API_STATUS_ERROR_MASK) == 0 ))
+     {
++      // Check for either value, PUB: or PRIV:
+       int typeLen = strspn(tmpValue, "PUBRIV:");
+       if (typeLen != 0)
+       {
+@@ -328,6 +357,7 @@ int init(const char* value, int logLevel
+         }
+         else
+         {
++          // Invalid init string
+           myStatus |= API_STATUS_ERR_USER2;
+           continue;
+         }
+@@ -344,8 +374,22 @@ int init(const char* value, int logLevel
+           strLen   -= fNameLength;
+           tmpValue += fNameLength;
+ 
++          sca_status_t tmpStatus = API_STATUS_OK;
+           // Load the file and all the keys.
+-          _readKeyFile(string, isPrivate, &myStatus, DO_CONVERT);
++          _readKeyFile(string, isPrivate, &tmpStatus, DO_CONVERT);
++          if ((tmpStatus & API_STATUS_ERROR_MASK) != 0)
++          {
++            // Check if the error is recoverable
++            if ((tmpStatus & API_STATUS_ERR_KEY_IO) > 0)
++            {
++              // Add the info setting
++              tmpStatus |= isPrivate ? API_STATUS_INFO_USER1
++                                     : API_STATUS_INFO_USER2;
++              // REmove the error
++              tmpStatus = tmpStatus & ~API_STATUS_ERR_KEY_IO;              
++            }
++            myStatus |= tmpStatus;
++          }
+ 
+           if (strLen > 0)
+           {
+@@ -367,10 +411,11 @@ int init(const char* value, int logLevel
+   }
+   else
+   {
+-    myStatus |= API_STATUS_INFO_USER1;
++    myStatus |= API_STATUS_ERR_USER1;
++    sca_debugLog(LOG_ERR, "Internal key storage already initialized.\n", value);
+   }
+ 
+-  if (myStatus & API_STATUS_ERR_USER2)
++  if ((myStatus & API_STATUS_ERR_USER2) != 0)
+   {
+     sca_debugLog(LOG_ERR, "Invalid initialization parameter value='%s'\n", value);
+   }
+@@ -380,20 +425,22 @@ int init(const char* value, int logLevel
+     *status = myStatus;
+   }
+ 
+-  BOSSL_initialized = (myStatus & API_STATUS_ERROR_MASK) == API_STATUS_OK;
+-  if (BOSSL_initialized)
++  if ((myStatus & API_STATUS_ERROR_MASK) == API_STATUS_OK)
+   {
++    BOSSL_initialized = true;
+     sca_debugLog(LOG_INFO, "The internal key initialized storage holds (%u "
+                            "private and %u public keys)!\n",
+                            BOSSL_privKeys->size, BOSSL_pubKeys->size);
+   }
+   else
+   {
++    retVal = API_FAILURE;
+     ks_release(BOSSL_privKeys);
+     ks_release(BOSSL_pubKeys);
++    BOSSL_initialized = false;
+   }
+ 
+-  return BOSSL_initialized ? API_SUCCESS : API_FAILURE;
++  return retVal;
+ }
+ 
+   /**
+@@ -484,20 +531,21 @@ bool freeHashMessage(SCA_HashMessage* ha
+  */
+ bool freeSignature(SCA_Signature* signature)
+ {
+-  bool retVal = true;
++  bool retVal = false;
+ 
+   if (signature != NULL)
+   {
+     if (signature->ownedByAPI)
+     {
++      if (signature->sigBuff != NULL)
++      {
++        memset(signature->sigBuff, 0, signature->sigLen);
++      }
+       free(signature->sigBuff);
+-      signature->sigBuff = NULL;
+-      signature->sigLen  = 0;
++      memset(signature, 0, sizeof(SCA_Signature));
+       free (signature);
+-    }
+-    else
+-    {
+-      retVal = false;
++      
++      retVal = true;
+     }
+   }
+ 
+@@ -539,7 +587,7 @@ static unsigned char* _createSha256Diges
+  * The following error status codes can be set:
+  *
+  * API_STATUS_ERR_USER1: The hash input could not be generated
+- * API_STATUS_ERR_INVALID_KEY: The ex key retrieved from the storage is NULL.
++ * API_STATUS_ERR_INVALID_KEY: The hex key retrieved from the storage is NULL.
+  * API_STATUS_NO_DATA: No data to validate passed.
+  * API_STATUS_INFO_KEY_NOTFOUND: One or more of the keys could not be found.
+  * API_STATUS_INFO_SIGNATURE: One or more signatures could not be validated.
+@@ -704,13 +752,15 @@ int validate(SCA_BGPSecValidationData* d
+ }
+ 
+   /**
+-   * Sign the given BGPSecSign data using the given key. This method fills the
+-   * key into the BGPSecSignData object.
++ * Implementation of a single sign operation. Called by the external visible
++ * sign function.
+    *
+    * The following errors can be reported:
+    *   API_STATUS_ERR_INVLID_KEY: The algorithm id is wrong or the loaded key
+    *                              is invalid.
+    *   API_STATUS_ERR_NO_DATA: Some of the required data is missing.
++ *   API_STATUS_ERR_UNSUPPORTED_ALGO: The algorithm is not supported.
++ * 
+    *   API_STATUS_INFO_KEY_NOT_FOUND: As it says
+    *   API_STATUS_INFO_SIGNATURE: Could not generate a signature
+    *
+@@ -719,9 +769,9 @@ int validate(SCA_BGPSecValidationData* d
+    *                    generated signature.
+    * @param ski The ski of the key to be used.
+    *
+-   * @return API_SUCCESS (0) or API_FAILURE (1)
++ * @return API_SUCCESS or API_FAILURE 
+    */
+-int sign(SCA_BGPSecSignData* bgpsec_data)
++static int _sign(SCA_BGPSecSignData* bgpsec_data)
+ {
+   int          retVal   = API_FAILURE;
+   sca_status_t myStatus = API_STATUS_ERR_NO_DATA;
+@@ -731,7 +781,7 @@ int sign(SCA_BGPSecSignData* bgpsec_data
+   // we only might have the nlri, host information, and target.
+   // Otherwise we will have a bgpsec path attribute.
+   // In both cases we need the host, key, and target information
+-  // - lets forst make sure we have this minimum of data available. Once this
++  // - lets first make sure we have this minimum of data available. Once this
+   // is established check for the next required set of data according to the
+   // mode - originate or transit.
+   if (bgpsec_data != NULL)
+@@ -761,7 +811,7 @@ int sign(SCA_BGPSecSignData* bgpsec_data
+       if (bgpsec_data->nlri != NULL)
+       {
+         // Now generate the hash Message:
+-        bgpsec_data->hashMessage = sca_gnenerateOriginHashMessage(
++        bgpsec_data->hashMessage = sca_generateOriginHashMessage(
+             bgpsec_data->peerAS,
+             bgpsec_data->myHost, bgpsec_data->nlri,
+             bgpsec_data->algorithmID);
+@@ -895,6 +945,42 @@ int sign(SCA_BGPSecSignData* bgpsec_data
+ }
+ 
+   /**
++ * Sign the given BGPSecSign data using the given key. This method fills the
++ * key into the BGPSecSignData object.
++ *
++ * The following errors can be reported:
++ *   API_STATUS_ERR_INVLID_KEY: The algorithm id is wrong or the loaded key
++ *                              is invalid.
++ *   API_STATUS_ERR_NO_DATA: Some of the required data is missing.
++ *   API_STATUS_ERR_UNSUPPORTED_ALGO: The algorithm is not supported.
++ * 
++ *   API_STATUS_INFO_KEY_NOT_FOUND: As it says
++ *   API_STATUS_INFO_SIGNATURE: Could not generate a signature
++ *
++ *
++ * @param bgpsec_data The data object to be signed. This also includes the
++ *                    generated signature.
++ * @param ski The ski of the key to be used.
++ *
++ * @return API_SUCCESS or API_FAILURE 
++ */
++int sign(int count, SCA_BGPSecSignData** bgpsec_data)
++{
++  int retVal = API_SUCCESS;
++  int idx = 0;
++  
++  for (; idx < count; idx++)
++  {
++    if (_sign(bgpsec_data[idx]) == API_FAILURE)
++    {
++      retVal = API_FAILURE;
++    }
++  }
++  
++  return retVal;
++}
++
++/**
+    * Register the given key. This method allows to register the
+    * key with the API object. The key must be internally copied.
+    * The memory is NOT shared for longer than the registration execution cycle.
+@@ -905,21 +991,22 @@ int sign(SCA_BGPSecSignData* bgpsec_data
+    *   Also see key_storage.ks_storeKey()
+    *
+    * @param key The key itself - MUST contain the DER encoded key.
++ * @param source The source of the key.
+    * @param status Will contain the status information of this call.
+    * @param isPublic The type of key to be stored.
+    *
+-   * @return API_SUCCESS(1) or API_FAILURE(0 - check status)
++ * @return API_SUCCESS or API_FAILURE (check status)
+    *
+    * @since 0.2.0.3
+    */
+-  static u_int8_t _registerKey(BGPSecKey* key, sca_status_t* status,
+-                               bool isPrivate)
++static u_int8_t _registerKey(BGPSecKey* key, sca_key_source_t source,
++                             sca_status_t* status, bool isPrivate)
+   {
+     u_int8_t retVal = API_FAILURE;
+     if (key->keyLength != 0)
+     {
+       retVal = ks_storeKey(isPrivate ? BOSSL_privKeys : BOSSL_pubKeys,
+-                           key, status, true);
++                         key, source, status, true);
+     }
+     else if (status != NULL)
+     {
+@@ -942,27 +1029,36 @@ int sign(SCA_BGPSecSignData* bgpsec_data
+    * @param key The key itself - MUST contain the DER encoded key.
+    * @param status Will contain the status information of this call.
+    *
+-   * @return API_SUCCESS(1) or API_FAILURE(0 - check status)
++ * @return API_SUCCESS or API_FAILURE
+    */
+   u_int8_t registerPrivateKey(BGPSecKey* key, sca_status_t* status)
+   {
+-    return _registerKey(key, status, true);
++  return _registerKey(key, SCA_KSOURCE_INTERNAL, status, true);
+   }
+ 
+   /**
+    * Remove the registration of a given key with the specified key ID.
+    *
+-   * @param key The key needs at least contain the ASN and SKI.
++ * @param asn The ASN of the private key (network format).
++ * @param ski The 20 Byte ski
++ * @param algoID The algorithm ID of the key.
+    * @param status Will contain the status information of this call.
+    *
+    * The following errors can be reported:
+    *   See key_storage.ks_delKey()
+    *
+-   * @return API_SUCCESS(1) or API_FAILURE(0 - check status)
++ * @return API_SUCCESS or API_FAILURE (check status)
+    */
+-  u_int8_t unregisterPrivateKey(BGPSecKey* key, sca_status_t* status)
++u_int8_t unregisterPrivateKey(u_int32_t asn, u_int8_t* ski, u_int8_t algoID, 
++                              sca_status_t* status)
+   {
+-    return ks_delKey(BOSSL_privKeys, key, status);
++  BGPSecKey key;
++  key.asn       = asn;
++  key.algoID    = algoID;
++  memcpy(&key.ski, ski, SKI_LENGTH);
++  key.keyLength = 0;
++  key.keyData   = NULL;
++  return ks_delKey(BOSSL_privKeys, &key, SCA_KSOURCE_INTERNAL, status);
+   }
+ 
+   /**
+@@ -977,13 +1073,15 @@ int sign(SCA_BGPSecSignData* bgpsec_data
+    *   See key_storage.ks_storeKey()
+    *
+    * @param key The key itself - MUST contain the DER encoded key.
++ * @param source The source of the key.
+    * @param status Will contain the status information of this call.
+    *
+-   * @return API_SUCCESS(1) or API_FAILURE(0 - check status)
++ * @return API_SUCCESS or API_FAILURE (check status)
+    */
+-  u_int8_t registerPublicKey(BGPSecKey* key, sca_status_t* status)
++u_int8_t registerPublicKey(BGPSecKey* key, sca_key_source_t source,
++                           sca_status_t* status)
+   {
+-    return _registerKey(key, status, false);
++  return _registerKey(key, source, status, false);
+   }
+ 
+   /**
+@@ -995,17 +1093,122 @@ int sign(SCA_BGPSecSignData* bgpsec_data
+    *   See key_storage.ks_delKey()
+    *
+    * @param key The key needs at least contain the ASN and SKI.
++ * @param source The source of the key
+    * @param status Will contain the status information of this call.
+    *
+-   * @return API_SUCCESS(1) or API_FAILURE(0 - check status)
++ * @return API_SUCCESS or API_FAILURE (check status)
++ */
++u_int8_t unregisterPublicKey(BGPSecKey* key, sca_key_source_t source,
++                             sca_status_t* status)
++{
++  return ks_delKey(BOSSL_pubKeys, key, source, status);
++}
++
++/**
++ * Internal method to clean the keys
++ * 
++ * @param source The key source which has to be removed.
++ * @param status The status flag
++ * @param isPrivate indicates if the keys are in the private (true) or 
++ *                   public (false) key storage.
++ */
++static void _cleanKeys(sca_key_source_t source, sca_status_t* status, 
++                       bool isPrivate)
++{
++  KeyStorage* storage = isPrivate ? BOSSL_privKeys : BOSSL_pubKeys;
++  int count = ks_removeSource(storage, source);
++  
++  if (count == 0)
++  {
++    if (status != NULL)
++    {
++      *status = API_STATUS_INFO_KEY_NOTFOUND;
++    }
++  }
++}
++
++/**
++ * Remove all public keys from the internal storage that were provided by the 
++ * given key source.
++ * 
++ * @param source The source of the keys.
++ * @param status Will contain the status information of this call.
++ * 
++ * API_STATUS_INFO_KEY_NOTFOUND: If no key was found.
++ * 
++ * @return API_SUCCESS
++ * 
++ * @since 0.3.0.0
++ */
++u_int8_t cleanKeys(sca_key_source_t source, sca_status_t* status)
++{
++  _cleanKeys(source, status, false);  
++  return API_SUCCESS;
++}
++
++/**
++ * Remove all private keys from the internal storage.
++ * 
++ * @param status Will contain the status information of this call.
++ * 
++ * @return API_SUCCESS or API_FAILURE (check status)
++ * 
++ * @since 0.3.0.0
+    */
+-  u_int8_t unregisterPublicKey(BGPSecKey* key, sca_status_t* status)
++u_int8_t cleanPrivateKeys(sca_status_t* status)
+   {
+-    return ks_delKey(BOSSL_pubKeys, key, status);
++  _cleanKeys(SCA_KSOURCE_INTERNAL, status, true);
++  return API_SUCCESS;
+   }
+ 
++/**
++ * Allows to query if this plug-in supports the requested algorithm IDdd.
++ * 
++ * @param algoID The algorithm ID.
++ * 
++ * @return true if the algorithm is supported or not.
++ * 
++ * @since 0.3.0.0
++ */
++bool isAlgorithmSupported(u_int8_t algoID)
++{
++  return (algoID == SCA_ECDSA_ALGORITHM);
++}
+ 
+ 
++/** 
++ * This function is only for the compiler to check the correct implementation
++ * of the API. (Make sure all required functions do exist.)
++ * 
++ * @since 0.3.0.0
++ */
++ __attribute__((unused)) static void comptest()
++{
++  SRxCryptoAPI compAPI;
++  compAPI.init                 = init;
++  compAPI.release              = release;
++
++  compAPI.sign                 = sign;
++  compAPI.validate             = validate;
++
++  compAPI.freeHashMessage      = freeHashMessage;
++  compAPI.freeSignature        = freeSignature;
++
++  compAPI.setDebugLevel        = setDebugLevel;
++  compAPI.getDebugLevel        = getDebugLevel;
++
++  compAPI.isAlgorithmSupported = isAlgorithmSupported;
++
++  compAPI.registerPublicKey    = registerPublicKey;
++  compAPI.unregisterPublicKey  = unregisterPublicKey;
++
++  compAPI.registerPrivateKey   = registerPrivateKey;
++  compAPI.unregisterPrivateKey = unregisterPrivateKey;
++
++  compAPI.cleanKeys            = cleanKeys;
++  compAPI.cleanPrivateKeys     = cleanPrivateKeys; 
++}
++
+ __attribute__((always_inline)) inline void printHex(int len, unsigned char* buff)
+ {
+   int i;
+@@ -1016,3 +1219,4 @@ __attribute__((always_inline)) inline vo
+   }
+   printf("\n");
+ }
++
+--- /opt/project/NIST-BGP-SRx/srx-crypto-api/./bgpsec_openssl/key_storage.c	2020-05-07 12:52:09.907785261 -0400
++++ ./bgpsec_openssl/key_storage.c	2017-11-27 15:17:52.000000000 -0500
+@@ -27,10 +27,15 @@
+  * Known Issue:
+  *   At this time only PEM formated private keys can be loaded.
+  * 
+- * @version 0.2.0.3
++ * @version 0.3.0.0
+  * 
+  * Changelog:
+  * -----------------------------------------------------------------------------
++ *  0.3.0.0 - 2017/09/13 - oborchert
++ *            * Removed unused code.
++ *            * Fixed timestamp in Version control
++ *          - 2017/08/17 - oborchert
++ *            * Added function ks_removeSource.
+  *  0.2.0.3 - 2017/07/09 - oborchert
+  *            * BZ1186: Fixed problem while unregistering keys.
+  *            * Modified return value documentation of function ks_getKey which
+@@ -161,7 +166,8 @@ static EC_KEY* _ks_convertKey(u_int8_t*
+ }
+ 
+ /**
+- * Retrieve the EC_KEY associated to the given ski and asn
++ * Retrieve the EC_KEY associated to the given ski and asn. Here the source is
++ * ignored.
+  * 
+  * Possible USER return values:
+  * 
+@@ -192,7 +198,7 @@ void** ks_getKey(KeyStorage* storage, u_
+   if (myStatus == API_STATUS_OK)
+   {
+     // find the correct elem list
+-    int bucket = _ks_getBucket(asn);    
++    u_int8_t bucket = _ks_getBucket(asn);    
+     KS_Key_Element* elem = storage->head[bucket];
+     
+     while (elem != NULL)
+@@ -503,11 +509,13 @@ void ks_release(KeyStorage* storage)
+  * @param key The BGPSecKey to be deleted - the given key will not be touched, 
+  *            the stored version will. If both are the exact same, then the 
+  *            provided key is deleted as well. 
++ * @param source The source of the key.
+  * @param status an OUT value that provides more information.
+  * 
+- * @return API_SUCESS (1) otherwise API_FAILED (0 - see status). 
++ * @return API_SUCESS otherwise API_FAILED (see status). 
+  */
+-int ks_delKey(KeyStorage* storage, BGPSecKey* key, sca_status_t* status)
++int ks_delKey(KeyStorage* storage, BGPSecKey* key, sca_key_source_t source,
++              sca_status_t* status)
+ {
+   int retVal = API_SUCCESS; 
+   int myStatus = API_STATUS_OK;
+@@ -689,13 +697,14 @@ void ks_empty(KeyStorage* storage)
+  * 
+  * @param storage The storage where the key is stored in
+  * @param key The BGPSecKey to be stored.
++ * @param source The source where the ley came from.
+  * @param status an OUT value that provides more information.
+  * @param convert if true then convert the DER key into the EC_KEY
+  * 
+  * @return API_SUCESS if it could be stored, otherwise API_FAILED. 
+  */
+-int ks_storeKey(KeyStorage* storage, BGPSecKey* key, sca_status_t* status, 
+-                bool convert)
++int ks_storeKey(KeyStorage* storage, BGPSecKey* key, sca_key_source_t source, 
++                sca_status_t* status, bool convert)
+ {
+   sca_status_t myStatus = API_STATUS_OK;
+   int  retVal   = API_SUCCESS;
+@@ -863,3 +872,62 @@ int ks_storeKey(KeyStorage* storage, BGP
+   return retVal = ((myStatus & API_STATUS_ERROR_MASK) != 0) ? API_FAILURE
+                                                             : API_SUCCESS;
+ }
+\ No newline at end of file
++
++/** 
++ * Remove all keys from the given source.
++ * 
++ * @param storage The storage from where the keys will be removed.
++ * @param source The source specifying the keys to be removed.
++ * 
++ * @return The number of keys that are removed.
++ * 
++ * @since 0.3.0.0
++ */
++int ks_removeSource(KeyStorage* storage, sca_key_source_t source)
++{
++  printf ("KEYSTORAGE: ks_removeSource not implemented yet.");
++  int idx = 0;
++  KS_Key_Element* keyElem  = NULL;
++  
++  // Walk through all buckets
++  for (; idx < KS_BUCKETS; idx++)
++  {
++    // set element to kead and check from here
++    keyElem  = storage->head[idx];
++    if (keyElem != NULL)
++    {
++      // This bucket contains keys, walk the list.
++      while (keyElem != NULL)
++      {
++        if (keyElem->source == source)
++        {
++          if (keyElem->next != NULL)
++          {
++            // Move to the next already and then remove the element
++            keyElem = keyElem->next;
++            _ks_freeKS_Elem(storage, idx, keyElem->prev);  
++          }
++          else if (keyElem->prev != NULL)
++          {
++            // No next available, goto the previous and then remove it.
++            keyElem = keyElem->prev;
++            _ks_freeKS_Elem(storage, idx, keyElem->next);  
++          }
++          else
++          {
++            // It seams only this element is available, remove it
++            _ks_freeKS_Elem(storage, idx, keyElem);  
++            keyElem = NULL;
++          }
++        }
++        else
++        {
++          keyElem = keyElem->next;
++        }
++      }
++    }
++  }
++  
++  
++  return 0;
++}
+--- /opt/project/NIST-BGP-SRx/srx-crypto-api/./crypto_testlib/crypto_testlib.c	2020-05-07 12:52:09.909785258 -0400
++++ ./crypto_testlib/crypto_testlib.c	2017-11-27 15:17:52.000000000 -0500
+@@ -15,16 +15,25 @@
+  * DISCLAIM ANY LIABILITY OF ANY KIND FOR ANY DAMAGES WHATSOEVER RESULTING
+  * FROM THE USE OF THIS SOFTWARE.
+  *
+- * This software provides a test implementation for a BGPSec plugin. This
+- * plugin does provide mostly empty functions except validation allows to be 
++ * This software provides a test implementation for a BGPsec plug-in. This
++ * plug-in does provide mostly empty functions except validation allows to be 
+  * configured for parsing the bgpsec path attribute only. Also it can be 
+  * configured with a default validation result as well as print found 
+  * signatures.
+  * 
+- * @version 0.2.0.2
++ * @version 0.3.0.0
+  *
+  * ChangeLog:
+  * -----------------------------------------------------------------------------
++ *   0.3.0.0 - 2017/09/12 - oborchert
++ *             * Added missing mappings to function comptest and added compiler 
++ *               function attribute unused.
++ *             * Fixed return value in sign method.
++ *           - 2017/08/15 - oborchert
++ *             * Assess function compAPI that maps each method to a temp
++ *               SRxCryptoAPI object to assure correct implementation. 
++ *               (Or the compiler throws an error).
++ *             * Updated all API functions to the latest version.
+  *   0.2.0.2 - 2016/11/16 - oborchert
+  *             * Added some functionalities to this test module.
+  *   0.2.0.0 - 2016/05/25 - oborchert
+@@ -44,6 +53,7 @@
+  *             * Created File.
+  */
+ #include <syslog.h>
++#include <malloc.h>
+ #include <stddef.h>
+ #include <string.h>
+ #include <stdio.h>
+@@ -63,6 +73,8 @@ static bool ct_doParseBGPSecAttr = false
+  * be printed.*/
+ static bool ct_printSignatures   = true;
+ 
++bool freeSignature(SCA_Signature* signature);
++
+ /**
+  * Print the data in hex format. This method prints at least one '\n'.
+  * 
+@@ -220,47 +232,92 @@ int validate(SCA_BGPSecValidationData* d
+  * Sign the given BGPSecSign data using the given key. This method fills the
+  * key into the BGPSecSignData object.
+  *
++ * API_STATUS_ERR_USER1: In case one of the signatures is already generated and
++ *                       NOT owned by the API.
++ * 
+  * @param bgpsec_data The data object to be signed. This also includes the
+  *                    generated signature.
+  * @param ski The ski of the key to be used.
+  *
+- * @return API_SUCCESS (0) or API_FAILURE (1)
++ * @return API_FAILURE
+  */
+-int sign(SCA_BGPSecSignData* bgpsec_data)
++int sign(int count, SCA_BGPSecSignData** bgpsec_data)
+ {
+   // Return an error for missing implementation.
+-  sca_debugLog (LOG_DEBUG, "CryptoTestLib: Called 'validate'\n");
+-  int status = bgpsec_data != NULL ? API_STATUS_OK : API_STATUS_ERR_NO_DATA;
++  sca_debugLog (LOG_DEBUG, "CryptoTestLib: Called 'sign'\n");
++  int idx    = 0;
++  int retVal = API_SUCCESS;
++  SCA_BGPSecSignData* data = NULL;
+     
+-  return status == API_STATUS_OK ? API_VALRESULT_VALID : API_VALRESULT_INVALID;    
++  for (; idx < count; idx++)
++  {
++    data = bgpsec_data[idx];
++    data->status = API_STATUS_OK;
++    if (data->algorithmID == SCA_ECDSA_ALGORITHM)
++    {
++      if (data->signature != NULL)
++      {
++        if (freeSignature(data->signature))
++        {
++          data->status |= API_STATUS_ERR_USER1;
++          retVal = API_FAILURE;
++          continue;
++        }
++      }
++      data->signature = malloc(sizeof(SCA_Signature));
++      data->signature->algoID     = SCA_ECDSA_ALGORITHM;
++      data->signature->ownedByAPI = true;
++      memcpy(data->signature->ski, data->ski, SKI_LENGTH);
++      data->signature->sigBuff = malloc(70);
++      memset(data->signature->sigBuff, 0xAA, 70);
++      data->signature->sigLen = 70;
++    }
++    else
++    {
++      data->status = API_STATUS_ERR_UNSUPPPORTED_ALGO;
++      retVal = API_FAILURE;
++    }
++  }
++  return API_FAILURE;
+ }
+-
+ 
+ /**
+  * Register the private key. This method does not store the key. the return 
+- * value is 0
++ * value is API_FAILURE.
+  * 
+  * @param key The key to be stored
++ * @param source The source of the key
++ * @param status The status of the key registration
+  * 
+- * @return API_FAILURE (0) for failure
++ * @return API_FAILURE for failure (API_STATUS_ERR_USER1)
+  */
+-u_int8_t registerPrivateKey(BGPSecKey* key)
++u_int8_t registerPrivateKey(BGPSecKey* key, sca_status_t* status)
+ {
+   // Return an error for missing implementation.
+   sca_debugLog (LOG_DEBUG, "CryptoTestLib: Called 'registerPrivateKey'\n");
+   
++  if (status != NULL)
++  {
++    *status = API_STATUS_ERR_USER1;
++  }
++  
+   return API_FAILURE;
+ }
+ 
+ /**
+  * Unregister the key. This method actually does not register unregister the 
+- * key. It returns 0
++ * key. The return value is API_SUCCESS.
+  * 
+- * @param keyID The key id to unregister.
++ * @param asn The asn of the private key
++ * @param ski The SKI of the private key (Length 20 bytes)
++ * @param algoID The algorithm id of the private key
++ * @param status The status of the key removal
+  * 
+- * @return API_FAILURE (0) for failure
++ * @return API_SUCCESS
+  */
+-u_int8_t unregisterPrivateKey(char* ski)
++u_int8_t unregisterPrivateKey(u_int32_t asn, u_int8_t* ski, u_int8_t algoID, 
++                              sca_status_t* status)
++
+ {
+   // Return an error for missing implementation.
+   sca_debugLog (LOG_DEBUG, "CryptoTestLib: Called 'unregisterPrivateKey'\n");  
+@@ -276,14 +333,22 @@ u_int8_t unregisterPrivateKey(char* ski)
+  * NOTE: The key information MUST be copied within the API. 
+  * 
+  * @param key The key itself. 
++ * @param source The source of the key
++ * @param status The status of the key
+  * 
+- * @return API_FAILURE (0) for failure
++ * @return API_FAILURE for failure (API_STATUS_ERR_USER1)
+  */
+-u_int8_t registerPublicKey(BGPSecKey* key)
++u_int8_t registerPublicKey(BGPSecKey* key, sca_key_source_t source,
++                           sca_status_t* status)
+ {
+   // Return an error for missing implementation.
+   sca_debugLog (LOG_DEBUG, "CryptoTestLib: Called 'registerPublicKey'\n");
+   
++  if (status != NULL)
++  {
++    *status = API_STATUS_ERR_USER1;
++  }
++  
+   return API_FAILURE;  
+ }
+ 
+@@ -293,14 +358,22 @@ u_int8_t registerPublicKey(BGPSecKey* ke
+  * given SKI and ASN.
+  * 
+  * @param key The key itself. 
++ * @param source The source of the key
++ * @param status The status of the key removal
+  * 
+- * @return API_FAILURE (0) for failure
++ * @return API_FAILURE for failure (API_STATUS_ERR_USER1)
+  */
+-int unregisterPublicKey(BGPSecKey* key)
++u_int8_t unregisterPublicKey(BGPSecKey* key, sca_key_source_t source,
++                                sca_status_t* status)
+ {
+   // Return an error for missing implementation.
+   sca_debugLog (LOG_DEBUG, "CryptoTestLib: Called 'unregisterPublicKey'\n");
+   
++  if (status != NULL)
++  {
++    *status = API_STATUS_ERR_USER1;
++  }
++  
+   return API_FAILURE;    
+ }
+ 
+@@ -314,10 +387,12 @@ int unregisterPublicKey(BGPSecKey* key)
+  * By default all values are false.
+  * 
+  * @param value some string
++ * @param debugLevel IGNORED
++ * @param status The status information
+  * 
+- * @return API_SUCCESS (1)
++ * @return API_SUCCESS
+  */
+-int init(const char* value)
++int init(const char* value, int debugLevel, sca_status_t* status)
+ {
+   if (value != NULL)
+   {
+@@ -382,7 +457,7 @@ int init(const char* value)
+    * This will be called prior un-binding the library. This allows the API 
+    * implementation to perform a clean shutdown / cleanup.
+    * 
+-   * @return API_SUCCESS(1)
++ * @return API_SUCCESS
+    * 
+    * @since 0.2.0.0
+    */
+@@ -391,3 +466,175 @@ int init(const char* value)
+     return API_SUCCESS;
+   }
+ 
++/**
++ * Allows to query if this plug-in supports the requested algorithm IDdd.
++ * 
++ * @param algoID The algorithm ID.
++ * 
++ * @return true if the algorithm ECDSA p256 (1).
++ * 
++ * @since 0.3.0.0
++ */
++bool isAlgorithmSupported(u_int8_t algoID)
++{
++  return algoID == SCA_ECDSA_ALGORITHM ? true : false;
++}
++
++/**
++ * Remove all keys from the internal storage that were provided by the given
++ * key source.
++ * 
++ * @param source The source of the keys.
++ * @param status Will contain the status information of this call.
++ * 
++ * @return API_FAILURE (API_STATUS_ERR_USER1)
++ * 
++ * @since 0.3.0.0
++ */
++u_int8_t cleanKeys(sca_key_source_t source, sca_status_t* status)
++{
++  if (status != NULL)
++  {
++    *status = API_STATUS_ERR_USER1;
++  }
++  
++  return API_FAILURE;
++}
++
++/**
++ * Remove all private keys from the internal storage.
++ * 
++ * @param status Will contain the status information of this call.
++ * 
++ * @return API_FAILURE
++ * 
++ * @since 0.3.0.0
++ */
++u_int8_t cleanPrivateKeys(sca_status_t* status)
++{
++  if (status != NULL)
++  {
++    *status = API_STATUS_ERR_USER1;
++  }
++  
++  return API_FAILURE;
++}
++
++/**
++ * Return the actively used debug level
++ *
++ * @return the debug level used within the API
++ * 
++ * @since 0.3.0.0
++ */
++int getDebugLevel()
++{
++  return (int)sca_getCurrentLogLevel();
++}
++
++/**
++ * This API does not support individual logging configuration!
++ *
++ * @param debugLevel Ignored!
++ *
++ * @return -1
++ * 
++ * @since 0.3.0.0
++ */
++int setDebugLevel(int debugLevel)
++{
++  return -1;
++}
++
++/**
++ * In case the validation method does return the generated hashMessage, this
++ * function is used to free the allocated memory.
++ * 
++ * This function is copies from bgpsec_openssl.c
++ *
++ * @param hashMessage The generated hash input data, must be generated by the
++ *                    API mapped library and retrieved using the validate
++ *                    call.
++ *
++ * @return false if the API is not the owner of the memory and cannot release
++ *         the allocation, otherwise true
++ * 
++ * @since 0.3.0.0
++ */
++bool freeHashMessage(SCA_HashMessage* hashMessage)
++{
++  // To allow the memory being freed, set ownedByAPI to false. BZ1068
++  if (hashMessage != NULL)
++  {
++    hashMessage->ownedByAPI = false;
++  }
++  return sca_freeHashInput(hashMessage);
++}
++
++/**
++ * Signatures are generated by the API and also freed by the API module.
++ * 
++ * This function is copied from btgpsec_openss;
++ *
++ * @param signature The signature element.
++ *
++ * @return false if the API is not the owner of the memory and cannot release
++ *         the allocation, otherwise true
++ * 
++ * @since 0.3.0.0
++ */
++bool freeSignature(SCA_Signature* signature)
++{
++  bool retVal = false;
++
++  if (signature != NULL)
++  {
++    if (signature->ownedByAPI)
++    {
++      if (signature->sigBuff != NULL)
++      {
++        memset(signature->sigBuff, 0, signature->sigLen);
++      }
++      free(signature->sigBuff);
++      memset(signature, 0, sizeof(SCA_Signature));
++      free (signature);
++      
++      retVal = true;
++    }
++  }
++
++  return retVal;
++}
++
++/** 
++ * This function is only for the compiler to check the correct implementation
++ * of the API. (Make sure all required functions do exist.)
++ * 
++ * @since 0.3.0.0
++ */
++__attribute__((unused)) static void comptest()
++{
++  SRxCryptoAPI compAPI;
++  compAPI.init                 = init;
++  compAPI.release              = release;
++
++  compAPI.sign                 = sign;
++  compAPI.validate             = validate;
++
++  compAPI.freeHashMessage      = freeHashMessage;
++  compAPI.freeSignature        = freeSignature;
++
++  compAPI.setDebugLevel        = setDebugLevel;
++  compAPI.getDebugLevel        = getDebugLevel;
++
++  compAPI.isAlgorithmSupported = isAlgorithmSupported;
++
++  compAPI.registerPublicKey    = registerPublicKey;
++  compAPI.unregisterPublicKey  = unregisterPublicKey;
++
++  compAPI.registerPrivateKey   = registerPrivateKey;
++  compAPI.unregisterPrivateKey = unregisterPrivateKey;
++
++  compAPI.cleanKeys            = cleanKeys;
++  compAPI.cleanPrivateKeys     = cleanPrivateKeys; 
++}
+--- /opt/project/NIST-BGP-SRx/srx-crypto-api/./config.h	2020-05-07 12:55:51.545464475 -0400
++++ ./config.h	2020-05-07 10:53:00.846134919 -0400
+@@ -91,7 +91,7 @@
+ #define PACKAGE_NAME "SRxCryptoAPI"
+ 
+ /* Define to the full name and version of this package. */
+-#define PACKAGE_STRING "SRxCryptoAPI 0.2.0.6"
++#define PACKAGE_STRING "SRxCryptoAPI 0.3.0.0"
+ 
+ /* Define to the one symbol short name of this package. */
+ #define PACKAGE_TARNAME "srxcryptoapi"
+@@ -100,7 +100,7 @@
+ #define PACKAGE_URL ""
+ 
+ /* Define to the version of this package. */
+-#define PACKAGE_VERSION "0.2.0.6"
++#define PACKAGE_VERSION "0.3.0.0"
+ 
+ /* Define to 1 if you have the ANSI C header files. */
+ #define STDC_HEADERS 1
+@@ -109,7 +109,7 @@
+ /* #undef USE_PRELOAD_SYMBOL */
+ 
+ /* Version number of package */
+-#define VERSION "0.2.0.6"
++#define VERSION "0.3.0.0"
+ 
+ /* Define to rpl_malloc if the replacement function should be used. */
+ /* #undef malloc */

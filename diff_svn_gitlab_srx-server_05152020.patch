@@ -1,0 +1,2245 @@
+--- /opt/project/NIST-BGP-SRx/srx-server/./src/tools/rpkirtr_svr.c	2020-05-07 12:52:09.931785226 -0400
++++ ./src/tools/rpkirtr_svr.c	2017-12-05 16:45:33.000000000 -0500
+@@ -28,22 +28,12 @@
+  * - Removed, i.e. withdrawn routes are kept for one hour
+  *   (see CACHE_EXPIRATION_INTERVAL)
+  *
+- * @version 0.5.0.5
++ * @version 0.5.1.0
+  *
+  * Changelog:
+  * -----------------------------------------------------------------------------
+- * 0.5.0.5  - 2018/04/24 - oborchert
+- *            * Modified the function printLogMessage to use the current log 
+- *              level rather than hard coded log level.
+- *            * Change default value for verbose to false.
+- * 0.5.0.4  - 2018/03/08 - oborchert
+- *            * Fixed incorrect processing of parameters.
+- *            * Fixed incorrect syntax printout.
+- * 0.5.0.3  - 2018/03/01 - oborchert
+- *            * Added proper program stop when help parameter is provided.
+- *            * Fixed printout for router keys.
+- *          - 2018/02/28 - oborchert
+- *            * Fixed usage of incorrect version number.
++ * 0.5.1.0  - 2017/10/12 - oborchert
++ *            * BZ1103: Fixed incorrect RFC reference
+  * 0.5.0.1  - 2017/09/25 - oborchert
+  *            * Fixed compiler warnings.
+  * 0.5.0.0  - 2017/07/08 - oborchert
+@@ -77,7 +67,7 @@
+  *              a more gracefull stop.
+  *            * Modified old fix M713 to not call trim on NULL. BZ1017
+  * 0.4.0.2  - 2016/08/12 - oborchert
+- *            * Changed default port from 50000 to 323 as specified by RFC6811
++ *            * Changed default port from 50000 to 323 as specified by RFC6810
+  * 0.3.0.10 - 2015/11/10 - oborchert
+  *            * Added parentheses around comparison in operand & in sendPrefixes
+  *            * Removed unused sessionID from function readPrefixData
+@@ -265,7 +255,7 @@ ServerSocket svrSocket;
+ /** A list of cache clients */
+ CacheClient* clients   = NULL;
+ /** Verbose mode on or off */
+-bool         verbose   = false;
++bool         verbose   = true;
+ /** the current cache session id value */
+ uint16_t     sessionID = 0;
+ 
+@@ -364,8 +354,7 @@ bool dropSession(int* fdPtr)
+  *
+  * @return
+  */
+-bool sendPDUWithSerial(int* fdPtr, RPKIRouterPDUType type, uint32_t serial, 
+-                       uint8_t version)
++bool sendPDUWithSerial(int* fdPtr, RPKIRouterPDUType type, uint32_t serial, uint8_t version)
+ {
+   uint8_t                pdu[sizeof(RPKISerialQueryHeader)];
+   RPKISerialQueryHeader* hdr;
+@@ -386,18 +375,17 @@ bool sendPDUWithSerial(int* fdPtr, RPKIR
+  * Send a CACHE RESET to the client.
+  *
+  * @param fdPtr the socket connection
+- * @param version The version for this session.
+  *
+  * @return true id the packet was send successful.
+  */
+-bool sendCacheReset(int* fdPtr, u_int8_t version)
++bool sendCacheReset(int* fdPtr)
+ {
+   uint8_t               pdu[sizeof(RPKICacheResetHeader)];
+   RPKICacheResetHeader* hdr;
+ 
+   // Create PDU
+   hdr = (RPKICacheResetHeader*)pdu;
+-  hdr->version  = version;
++  hdr->version  = RPKI_RTR_PROTOCOL_VERSION;
+   hdr->type     = (uint8_t)PDU_TYPE_CACHE_RESET;
+   hdr->reserved = 0;
+   hdr->length   = htonl(sizeof(RPKICacheResetHeader));
+@@ -409,11 +397,10 @@ bool sendCacheReset(int* fdPtr, u_int8_t
+  * Send a CACHE RESPONSE to the client.
+  *
+  * @param fdPtr the socket connection
+- * @param version The version number of this session
+  *
+  * @return true id the packet was send successful.
+  */
+-bool sendCacheResponse(int* fdPtr, u_int8_t version)
++bool sendCacheResponse(int* fdPtr, int version)
+ {
+   uint8_t                  pdu[sizeof(RPKICacheResetHeader)];
+   RPKICacheResponseHeader* hdr;
+@@ -439,7 +426,7 @@ bool sendCacheResponse(int* fdPtr, u_int
+  *                ignored.
+  */
+ void sendPrefixes(int* fdPtr, uint32_t clientSerial, uint16_t clientSessionID,
+-                  bool isReset, u_int8_t version)
++                  bool isReset, int version)
+ {
+   // No need to send the notify anymore
+   service.notify = false;
+@@ -458,7 +445,7 @@ void sendPrefixes(int* fdPtr, uint32_t c
+            && (checkSerial(cache.minPSExpired, cache.maxSExpired, clientSerial))
+           )
+   { // Serial is incorrect, send a Cache Reset
+-    if (!sendCacheReset(fdPtr, version))
++    if (!sendCacheReset(fdPtr))
+     {
+       ERRORF("Error: Failed to send a 'Cache Reset'\n");
+     }
+@@ -472,7 +459,7 @@ void sendPrefixes(int* fdPtr, uint32_t c
+     }
+     else
+     {
+-      OUTPUTF(true, "Cache size = %u\n", cache.entries.size);
++      printf("Cache size = %u\n", cache.entries.size);
+       if (cache.entries.size > 0) // there is always a root.
+       {
+         ValCacheEntry* cEntry;
+@@ -602,8 +589,7 @@ void sendPrefixes(int* fdPtr, uint32_t c
+       OUTPUTF(true, "Sending an 'End of Data (max. serial = %u)\n",
+               cache.maxSerial);
+ 
+-      // was sending cache version, not session version.
+-      if (!sendPDUWithSerial(fdPtr, PDU_TYPE_END_OF_DATA, cache.maxSerial, version))
++      if (!sendPDUWithSerial(fdPtr, PDU_TYPE_END_OF_DATA, cache.maxSerial, cache.version))
+       {
+         ERRORF("Error: Failed to send a 'End of Data'\n");
+       }
+@@ -630,7 +616,7 @@ int sendSerialNotifyToAllClients()
+     for (client = clients; client; client = client->hh.next)
+     {
+       if (!sendPDUWithSerial(&client->fd, PDU_TYPE_SERIAL_NOTIFY,
+-                             cache.maxSerial, client->version))
++                             cache.maxSerial, cache.version))
+       {
+         ERRORF("Error: Failed to send a 'Serial Notify\n");
+       }
+@@ -657,7 +643,7 @@ int sendCacheResetToAllClients()
+ 
+     for (client = clients; client; client = client->hh.next)
+     {
+-      if (!sendCacheReset(&client->fd, client->version))
++      if (!sendCacheReset(&client->fd))
+       {
+         ERRORF("Error: Failed to send a 'Cache Reset\n");
+       }
+@@ -676,14 +662,10 @@ int sendCacheResetToAllClients()
+  * @param the error number to be send
+  * @param data contains the error number followed by the PDU and text. The
+  *             character - as PDU or text generates a PDU / text length of zero.
+- * @param version The version of this session.
+- * 
+  * @return true if it could be send.
+  */
+-bool sendErrorPDU(int* fdPtr, RPKICommonHeader* pdu, char* reason, 
+-                  u_int8_t version)
++bool sendErrorPDU(int* fdPtr, RPKICommonHeader* pdu, char* reason)
+ {
+-  // @TODO: Fix this code.
+   printf("ERROR: invalid PDU because of %s\n", reason);
+ //  uint8_t                  pdu[sizeof(RPKIErrorReportHeader)];
+ //  RPKICacheResponseHeader* hdr;
+@@ -961,24 +943,23 @@ void handleClient(ServerSocket* svrSock,
+   // read the beginning of the header to see how many bytes are actually needed
+   while (recvNum(&sock, &hdr, sizeof(RPKICommonHeader)))
+   {
+-    if (hdr.version > RPKI_RTR_PROTOCOL_VERSION)
+-    {
+-      sendErrorPDU(&ccl->fd, &hdr, "Unsupported Version", 
+-                   RPKI_RTR_PROTOCOL_VERSION);
+-      close(sock);
+-      break;          
+-    }
+-    if (ccl->version == UNDEF_VERSION)
++    switch (ccl->version)
+     {
++      case UNDEF_VERSION:
+       ccl->version = hdr.version;
++        break;
++      case 0:
++      case 1:
++        break;
++      default:
++        sendErrorPDU(&ccl->fd, &hdr, "Unsupported Version");
++        continue;
+     } 
+-    else if (hdr.version != ccl->version)
++    if (ccl->version != hdr.version)
+     {
+-      // @TODO: Fix this and also close connection in this case.
+-      sendErrorPDU(&ccl->fd, &hdr, "Illegal switch of version number!", 
+-                   ccl->version);
+-      close(sock);
+-      break;
++      // Send error.
++      sendErrorPDU(&ccl->fd, &hdr, "Illegal switch of version number!");
++      continue;
+     }
+     
+     // determine the remaining data that needs to be received - if any
+@@ -1011,7 +992,7 @@ void handleClient(ServerSocket* svrSock,
+     // Time since the last request
+     diffReq = lastReq - time(NULL);
+ 
+-    OUTPUTF(true, "Received Data From Client [%x]...\n", sock);
++    printf ("Received Data From Client [%x]...\n", sock);
+ 
+     // Action depending on the type
+     switch ((RPKIRouterPDUType)hdr.type)
+@@ -1882,7 +1863,6 @@ int printCache()
+   unsigned    pos = 1;
+   ValCacheEntry* cEntry;
+   char        ipBuf[IPBUF_SIZE];
+-  int         idx=0;
+ 
+   now = time(NULL);
+ 
+@@ -1903,16 +1883,12 @@ int printCache()
+ 
+       if (cEntry->isKey)
+       {
+-        printf("SKI: ");
+-        for (idx = 0; idx < SKI_LENGTH; idx++)
+-        {
+-          printf ("%02X", (u_int8_t)cEntry->ski[idx]);
+-        }
+-        printf (", OAS=%u", ntohl(cEntry->asNumber));
++        printf("SKI: %02X%02X%02X%02X, OAS=%u",
++                (unsigned char)cEntry->ski[0], (unsigned char)cEntry->ski[1],
++                (unsigned char)cEntry->ski[2], (unsigned char)cEntry->ski[3],
++                ntohl(cEntry->asNumber));
+       }
+-      else
+-      {
+-        if (cEntry->isV6)
++      else if (cEntry->isV6)
+         {
+           printf("%s/%hhu, OAS=%u",
+                  ipV6AddressToStr(&cEntry->address.v6, ipBuf, IPBUF_SIZE),
+@@ -1926,7 +1902,6 @@ int printCache()
+         }
+         printf(", Max.Len=%hhu, Serial=%u, Prev.Serial=%u",
+                cEntry->prefixMaxLength, cEntry->serial, cEntry->prevSerial);
+-      }
+ 
+       if (cEntry->expires > 0)
+       {
+@@ -2476,16 +2451,9 @@ void serviceTimerExpired(int id, time_t
+   }
+ }
+ 
+-/** 
+- * Use the log level specified or if verbose is enabled.
+- * 
+- * @param level The log level of the message/
+- * @param fmt The format string
+- * @param args The argument list matching the format string.
+- */
+ void printLogMessage(LogLevel level, const char* fmt, va_list args)
+ {
+-  if ((level == getLogLevel()) || verbose)
++  if ((level == LEVEL_ERROR) || verbose)
+   {
+     putc('\r', stdout);
+     vprintf(fmt, args);
+@@ -2561,8 +2529,6 @@ static void syntax(const char* prgName)
+   printf ("  specify a script!\n");
+   printf ("  If No port is specified the default port %u is used.\n",
+           DEF_RPKI_PORT);
+-  printf ("\n");
+-  showVersion();
+ }
+ 
+ /**
+@@ -2587,9 +2553,7 @@ static bool parseParams(int argc, const
+   char* arg   = NULL;
+   int idx     = 0;
+   
+-  #define HMSG " - try '-?' for more info"
+-
+-  for (idx = 1; (idx < argc) && !doHelp && retVal; idx++)
++  for (idx = 1; (idx < argc) && !doHelp; idx++)
+   {
+     arg = (char*)argv[idx];
+     if (arg[0] == '-')
+@@ -2626,69 +2590,48 @@ static bool parseParams(int argc, const
+           }
+           else
+           {
+-            printf ("ERROR: Log level missing%s!\n", HMSG);
++            printf ("ERROR: Log level missing!");
++            doHelp = true;
+             retVal = false;
+             eVal   = 1;
+           }
+           break;
+           break;
+         case 'f':
+-          if (cfg->script == NULL)
+-          {
+             idx++;
+             if (idx < argc)
+             {
+-              cfg->script = (char*)argv[idx];
+-            }
+-            else
+-            {
+-              printf ("ERROR: filename missing%s!\n", HMSG);
+-              retVal = false;
+-              eVal   = 1;
+-            }
++            cfg->script = (char*)argv[idx++];
+           }
+           else
+           {
+-            printf ("ERROR: Script already added%s!\n", HMSG);
++            printf ("ERROR: filename missing!");
++            doHelp = true;
+             retVal = false;            
+             eVal   = 1;
+           }    
+           break;
+         default:
+-          printf ("ERROR: Invalid parameter '%s'%s!\n", arg, HMSG);
++          printf ("ERROR: Invalid parameter '%s'\n", arg);
++          doHelp = true;
+           retVal = false;
+           eVal   = 1;
+           break;
+       }
+     }
+-    else if ((strcmp(arg, "help") == 0) || (arg[0] == '?'))
++    else if (strcmp(arg, "help") == 0)
+     {
+       doHelp = true;
+     }
+     else if (cfg->port == 0)
+     {
+-      cfg->port = strtol(arg, NULL, 10);
+-    }
+-    else
+-    {
+-      if (cfg->script == NULL)
+-      {
+-        cfg->script = arg;
+-        printf ("WARNING: Script added but use -f <script> to add scripts in "
+-                "the future.\n");
+-      }
+-      else
+-      {
+-        printf ("ERROR: Script already added%s!\n", HMSG);
+-        retVal = false;
+-      }
++      cfg->port = strtol(argv[1], NULL, 10);
+     }
+   }
+ 
+   if (doHelp)
+   {
+     syntax(argv[0]);
+-    retVal = false;
+   }
+ 
+   // Configure the default port if not specified otherwise.
+--- /opt/project/NIST-BGP-SRx/srx-server/./src/tools/rpkirtr_client.c	2020-05-07 12:52:09.931785226 -0400
++++ ./src/tools/rpkirtr_client.c	2017-07-05 12:29:08.000000000 -0400
+@@ -22,30 +22,10 @@
+  * Connects to an RPKI/Router Protocol server and prints all received
+  * information on stdout.
+  *
+- * @version 0.5.0.4
++ * @version 0.5.0.0
+  *
+  * Changelog:
+  * -----------------------------------------------------------------------------
+- *  0.5.0.4 - 2018/03/09 - oborchert
+- *            * Do not print starting string on single run except if verbose is 
+- *              enabled.
+- *          - 2018/03/07 - oborchert
+- *            * Modified setting of st_verbose and st_debug. Also modified
+- *              logging according to the st_... values.
+- *          - 2018/03/06 - oborchert
+- *            * Renamed printReset and printPrefix into handle... 
+- *            * Added information if client can downgrade if protocol is 
+- *              larger than cache protocol.
+- *            * Added Program header printout.
+- *          - 2018/03/01 - oborchert
+- *            * BZ1264: Fixed define DEF_FMT_WD to correct default withdrawal 
+- *              formating.
+- *            * Added usage of readline to command for non single run.
+- *  0.5.0.3 - 2018/02/22 - oborchert
+- *            * Added version printout to program start.
+- *            * Fixed syntax printout.
+- *            * Moved some defines into rpki_router.h header file.
+- *            * Added rpki_packet_printer.h
+  *  0.5.0.0 - 2017/06/29 - oborchert
+  *            * Added end of data handler.
+  *            * Modified pringHex and calls to it to not have compiler warnings.
+@@ -70,28 +50,17 @@
+ #include <stdarg.h>
+ #include <errno.h>
+ #include <string.h>
+-#include <readline/readline.h>
+-#include "shared/rpki_router.h"
+-#include "server/rpki_packet_printer.h"
+ #include "server/rpki_router_client.h"
+ #include "util/log.h"
+ #include "util/prefix.h"
+ #include "util/io_util.h"
+-#include "util/str.h"
+ 
+ /** The default RPKI port (rfc6810) */
++#define DEF_RPKI_PORT  323
++#define DEF_RPKI_CACHE "localhost";
+ #define DEF_FMT_AN "+ %u %s(%u)"
+-#define DEF_FMT_WD "- %u %s(%u)"
+-
+-#define SRX_TOOLS_CACHE_CLIENT_NAME "RPKI Cache Client Tester"
+-
+-#define CMD_SERIAL_QUERY        's'
+-#define CMD_RESET_QUERY         'r'
+-#define CMD_QUIT_CLIENT         'q'
+-#define CMD_HELP_CLIENT         'h'
+-#define CMD_SEND_ERR_LAST_PD    'e'
+-#define CMD_DEBUG_REC           '1'
+-#define CMD_DEBUG_SND           '2'
++#define DEF_FMT_WD "+ %u %s(%u)"
++#define RPKI_CONNECTION_TIMEOUT 3;
+ 
+ /**
+  * Static parameter that specifies if this runs program in debug mode or not.
+@@ -106,18 +75,6 @@ static bool st_debug   = false;
+ static bool st_verbose = false;
+ 
+ /**
+- * Static parameter to indicate if received packages to be printed.
+- * @since 0.5.0.4
+- */
+-static bool st_print_receive = false;
+-
+-/**
+- * Static parameter to indicate if send packages to be printed.
+- * @since 0.5.0.4
+- */
+-static bool st_print_send = false;
+-
+-/**
+  * Static parameter that indicates if this program should only perform a single
+  * request.
+  *
+@@ -137,38 +94,37 @@ static char st_add_format[256] = {DEF_FM
+  * @since 0.5.0.0
+  */
+ static char st_del_format[256] = {DEF_FMT_WD "\n\0"};
+-
+ /*
+  * RPKI/Router client handlers
+  */
+-void handlePrefix(uint32_t valCacheID, uint16_t sessionID,
++void printPrefix(uint32_t valCacheID, uint16_t sessionID,
+                  bool isAnn, IPPrefix* prefix, uint16_t maxLen, uint32_t oas,
+                  void* _u)
+ {
+   char prefixBuf[MAX_PREFIX_STR_LEN_V6];
+ 
+-  if (isAnn)
++  if (st_debug)
+   {
+-    if (st_add_format[0] != 0)
++    LOG(LEVEL_DEBUG, "[Prefix] %s (vcd=0x%08X sessionID=0x%04X): prefix=%s-%u, "
++                     "as=%u", (isAnn ? "Ann" : "Wd"), valCacheID, sessionID,
++                     ipPrefixToStr(prefix, prefixBuf, MAX_PREFIX_STR_LEN_V6),
++                     maxLen, oas);
++  }
++  else if (isAnn)
+     {
+       printf (st_add_format, oas,
+               ipPrefixToStr(prefix, prefixBuf, MAX_PREFIX_STR_LEN_V6), maxLen);
+-    }
+-  } 
+-  else
+-  {
+-    if (st_del_format[0] != 0)
++  } else
+     {
+       printf (st_del_format, oas,
+               ipPrefixToStr(prefix, prefixBuf, MAX_PREFIX_STR_LEN_V6), maxLen);
+     }
+   }
+-}
+ 
+ /**
+  * Only adds a log entry
+  */
+-void handleReset()
++void printReset()
+ {
+   LOG(LEVEL_INFO, "Received a Cache Reset");
+ }
+@@ -254,8 +210,7 @@ void handleEndOfData(uint32_t valCacheID
+ bool handleError(uint16_t errNo, const char* msg, void* _u)
+ {
+   LOG(LEVEL_ERROR, "Received an error [%u], msg='%s'", errNo, msg);
+-  return errNo == RPKI_EC_NO_DATA_AVAILABLE; // Keep the connection only if not 
+-                                             // fatal
++  return errNo == 2; // Keep the connection only if not fatal
+ }
+ 
+ /**
+@@ -303,35 +258,22 @@ void sessionIDEstablished (uint32_t valC
+  */
+ void syntax(const char* prgName)
+ {
+-    printf ("\nSyntax: %s [options] [<host> [<port>]]\n\n", prgName);
+-    printf (" Options:\n");
+-    printf ("     -h, -H, -? --help\n"
+-            "         This screen.\n");
+-    printf ("     -D\n"
+-            "         Enable debug output.\n");
+-    printf ("     -v\n"
+-            "         Verbose.\n");
+-    printf ("     -pr\n"
+-            "         Print receive.\n");
+-    printf ("     -ps\n"
+-            "         Print send.\n");
+-    printf ("     -s\n"
+-            "         Perform only a single run.\n");
+-    printf ("     -a <format>\n"
+-            "         The printout format for announcements.\n");
+-    printf ("     -w <format>\n"
+-            "         The printout format for withdrawals.\n");
+-    printf ("     -V <0|1>\n"
+-            "         Version for RPKI router client.\n");
+-    printf ("     -d\n"
+-            "         Allow downgrading to Version 0 (only for -V 1)\n\n");
++    printf ("syntax: %s [options] [<host> [<port>]]\n", prgName);
++    printf (" options: -hH?Dvs --help help\n");
++    printf ("   help, --help, -h, -H: This screen.\n");
++    printf ("     -D: enable debug output.\n");
++    printf ("     -D: enable debug output.\n");
++    printf ("     -v: verbose.\n");
++    printf ("     -s: perform only a single run.\n");
++    printf ("     -a <format>: The printout format for announcements.\n");
++    printf ("     -r <format>: The printout format for withdrawals.\n");
++    printf ("     -V <0|1>: version for rpki router client.\n");
+     printf (" format:\n");
+-    printf ("    The default format is \"%s\" for announcements and\n"
++    printf ("    The default format if \"%s\" for announcements and\n"
+             "    \"%s\" for withdrawals.\n", DEF_FMT_AN, DEF_FMT_WD);
+     printf ("    The order in which the data is printed is ASN, Prefix, Maxlen");
+-    printf ("\n    This means the formating string must contain the order");
+-    printf ("\n    integer - string - integer");
+-    printf ("\n\n 2010-2018 ANTD NIST - Version %s\n", SRX_TOOLS_VERSION);
++    printf ("\n    This means the formating string must contain the order\n");
++    printf ("\n    integer - string - integer\n");
+ }
+ 
+ /**
+@@ -351,42 +293,28 @@ bool parseParams(int argc, char** argv,
+   char* arg     = NULL;
+   bool  retVal  = true;
+   bool  doHelp  = false;
+-  // Determine if a parameter switch is provided
+-  bool  pSwitch = false;
+-  bool  isA     = false;
+   int idx = 0;
+ 
+   *exitVal = 0;
+ 
+-  // serverhost MUST be NULL to indicate if it is set already
+   params->serverHost = NULL;
+-  // serverPort MUST be set to 0 to indicate if it is set already
+   params->serverPort = 0;
+-  // The protocol version to be used
+-  params->version    = RPKI_RTR_PROTOCOL_VERSION;
++  params->version = 0;
+ 
+-  for (idx = 1; (idx < argc) && !doHelp && !*exitVal; idx++)
++  for (idx = 1; (idx < argc) && !doHelp; idx++)
+   {
+     arg = (char*)argv[idx];
+-    pSwitch = false;
+-    
+-    switch (arg[0])
++    if (argv[idx][0] == '-')
++    {
++      // Move over the '-'
++      arg++;
++      if (strcmp(arg, "-help") == 0)
+     {
+-      case '-' :
+-        pSwitch = true;
+-        break;
+-      case '?' :
+         doHelp = true;
+-      default:
+-        break;
+     }
+-    
+-    if (pSwitch)
++      else
+     {
+-      // Move over the '-'
+-      arg++;
+-      isA = false;
+-
++        bool isA = false;
+       switch (arg[0])
+       {
+         case 'h':
+@@ -394,65 +322,31 @@ bool parseParams(int argc, char** argv,
+         case '?':
+           doHelp = true;
+           break;
+-        case 'D':
+-          // Add debug information
+-          st_debug   = true;
+-          // Debugging requires verbose to be enabled - no break here
+         case 'v':
+           // Add verbose information.
+           st_verbose = true;
+           break;
+-        case 'p':
+-          if (strlen(arg) == 2)
+-          {
+-            if (arg[1] == 'r')
+-            {
+-              st_print_receive = true;
+-            }
+-            else if (arg[1] == 's')
+-            {
+-              st_print_send = true;
+-            }
+-          }
+-          else
+-          {
+-            printf ("Error: Invalid print parameter '-%s'!\n", arg);
+-            *exitVal = 1;            
+-          }
++          case 'D':
++            // Add debug information
++            st_debug = true;
+           break;
+         case 's':
+           // Perform a single request only
+           st_single_request = true;
+           break;
+-        case 'V':
+-          if (++idx < argc)
+-          {
+-            params->version= atoi(argv[idx]);
+-          }
+-          else
+-          {
+-            printf ("Error: Version 0|1 is missing!\n");
+-            *exitVal = 1;
+-            doHelp = true;
+-          }
+-          if (params->version > RPKI_RTR_PROTOCOL_VERSION)
+-          {
+-            printf ("Error: Invalid version number %u!\n", params->version);
+-            *exitVal = 1;
+-            doHelp = true;            
+-          }
+-          break;
+-        case 'd':
+-          params->allowDowngrade = true;
+-          break;
+         case 'a':
+           isA = true;
++          case 'V':
++            params->version= atoi(argv[2] );
++            idx++;
++            break;
+         case 'w':
+           idx++;
+           if (idx < argc)
+           {
+             arg = argv[idx];
+-            snprintf(isA ? st_add_format : st_del_format, 256, "%s\n", arg);
++              if (isA) snprintf(st_add_format, 256, "%s\n", arg);
++              else     snprintf(st_add_format, 256, "%s\n", arg);
+           }
+           else
+           {
+@@ -461,19 +355,19 @@ bool parseParams(int argc, char** argv,
+             *exitVal = 1;
+           }
+           break;
+-        case '-':
+-          if (strcmp(arg, "-help") == 0)
+-          {
+-            doHelp = true;
+-            break;
+-          }
+         default:
+           printf ("Invalid parameter '%s'\n", arg);
+           doHelp = true;
+-          *exitVal = 1;
+           break;
+       }
+     }
++    }
++    else
++    {
++      if (strcmp(arg, "help") == 0)
++      {
++        doHelp = true;
++      }
+     else
+     {
+       if (params->serverHost == NULL)
+@@ -492,6 +386,7 @@ bool parseParams(int argc, char** argv,
+       }
+     }
+   }
++  }
+ 
+   if (doHelp)
+   {
+@@ -502,11 +397,11 @@ bool parseParams(int argc, char** argv,
+   {
+     if (params->serverHost == NULL)
+     {
+-      params->serverHost = RPKI_DEFAULT_CACHE;
++      params->serverHost = DEF_RPKI_CACHE;
+     }
+     if (params->serverPort == 0)
+     {
+-      params->serverPort = RPKI_DEFAULT_CACHE_PORT;
++      params->serverPort = DEF_RPKI_PORT;
+     }
+   }
+ 
+@@ -534,54 +429,26 @@ int main(int argc, const char* argv[])
+ 
+   client.stopAfterEndOfData = st_single_request;
+ 
+-  // Retrieve program name out of the first program argument
+-  char* realNamePtr = (char*)argv[0];
+-  char* nextPtr = strstr(realNamePtr, "/");
+-  while (nextPtr != NULL)
+-  {
+-    realNamePtr = nextPtr + 1;
+-    nextPtr = strstr(realNamePtr, "/");
+-  }
+-  
+-  if (!st_single_request || st_verbose)
+-  {
+-    printf ("Starting %s (%s) V%s\n", SRX_TOOLS_CACHE_CLIENT_NAME, realNamePtr,
+-                                      SRX_TOOLS_VERSION);
+-  }
+-  
+   // Print the configures settings.
+   if (st_verbose)
+   {
+     printf ("Use Configuration RPKT/RTR:\n");
+-    printf (" - Server.........: %s\n", params.serverHost);
+-    printf (" - Port...........: %i\n", params.serverPort);
+-    printf (" - Version........: %i\n", params.version);
+-    if (params.version > 0)
+-    {
+-      printf (" - Can Downgrade..: %s\n", params.allowDowngrade ? "on\0" 
+-                                                                : "off\0");
+-    }
++    printf (" - Server...: %s\n", params.serverHost);
++    printf (" - Port.....: %i\n", params.serverPort);
+   }
+ 
+-  // if verbose is enabled log to stdout, otherwise drop it.
+-  setLogMethodToFile(st_verbose ? stdout : NULL);
+-  // set log-level.
+-  setLogLevel(st_debug ? LEVEL_DEBUG : LEVEL_INFO);
++  // Send all errors and debugging to stdout
++  setLogMethodToFile(st_debug ? stdout : NULL);
+   
+   // Create a new client (establish connection, "Reset Query")
+-  params.prefixCallback               = handlePrefix;
+-  params.resetCallback                = handleReset;
++  params.prefixCallback               = printPrefix;
++  params.resetCallback                = printReset;
+   params.errorCallback                = handleError;
+   params.routerKeyCallback            = handleRouterKey;
+   params.connectionCallback           = handleConnection;
+   params.endOfDataCallback            = handleEndOfData;
+   params.sessionIDChangedCallback     = sessionIDChanged;
+   params.sessionIDEstablishedCallback = sessionIDEstablished;
+-  // The following is a default PDU printer.
+-  params.debugRecCallback             = st_print_receive 
+-                                        ? doPrintRPKI_to_RTR_PDU : NULL;
+-  params.debugSendCallback            = st_print_send
+-                                        ? doPrintRPKI_to_RTR_PDU : NULL;
+ 
+   if (!createRPKIRouterClient(&client, &params, NULL))
+   {
+@@ -613,81 +480,32 @@ int main(int argc, const char* argv[])
+     {
+       continue;
+     }
+-    if (!st_single_request)
++    do
+     {
+-      char* line = readline(">> ");
+-      if (line != NULL)
++      if (!st_single_request)
+       {
+-        cmd = line[0];
+-        free(line);
+-        line=NULL;
++        printf (">> ");
+       }
+-    }
+-    else 
+-    {
+-      do
+-      {
+         cmd = au_getchar(&client.stop, 0);
+       } while (cmd == '\n');
+-      printf ("\n");
+-    }
+       
+     switch (cmd)
+     {
+-      case CMD_SERIAL_QUERY:
+-        printf ("\n");
++      case 's':
+         sendSerialQuery(&client);
+         break;
+-      case CMD_RESET_QUERY:
+-        printf ("\n");
++      case 'r':
+         sendResetQuery(&client);
+         break;
+-      case CMD_QUIT_CLIENT:
++      case 'q':
+         doRun = false;
+         break;
+-      case CMD_SEND_ERR_LAST_PD:
+-        printf("Not implemented yet!\n");
+-        break;
+-      case CMD_DEBUG_REC:
+-        if (params.debugRecCallback != NULL)
+-        {
+-          params.debugRecCallback = NULL;
+-          printf ("Disabled debugging receiving PDUs\n");
+-        }
+-        else
+-        {
+-          params.debugRecCallback = doPrintRPKI_to_RTR_PDU;
+-          printf ("Enable debugging receiving PDUs\n");          
+-        }
+-        break;
+-      case CMD_DEBUG_SND:
+-        if (params.debugSendCallback != NULL)
+-        {
+-          params.debugSendCallback = NULL;
+-          printf ("Disabled debugging sending PDUs\n");
+-        }
+-        else
+-        {
+-          params.debugSendCallback = doPrintRPKI_to_RTR_PDU;
+-          printf ("Enable debugging sending PDUs\n");          
+-        }
+-        break;
+-      case CMD_HELP_CLIENT:
+-        printf ("%c = Send Serial Query\n"
+-                "    * Request all new PDU's\n", 
+-                CMD_SERIAL_QUERY);
+-        printf ("%c = Send Reset Query\n"
+-                "    * Request all PDU's known to the cache\n", 
+-                CMD_RESET_QUERY);
+-        printf ("%c = Quit the program\n", CMD_QUIT_CLIENT);
+-        printf ("%c = This screen\n", CMD_HELP_CLIENT);
+-        printf ("%c = Send the last received PDU as error.\n",
+-                CMD_SEND_ERR_LAST_PD);
+-        printf ("%c = Toggle Printing of received messages (currently %s)\n",
+-                CMD_DEBUG_REC, params.debugRecCallback != NULL ? "on"  : "off");
+-        printf ("%c = Toggle Printing of send messages (currently %s)\n",
+-               CMD_DEBUG_SND, params.debugSendCallback != NULL ? "on"  : "off");
+-        printf ("\n");
++      case 'h':
++        printf("s = Send Serial Query - Request all new PDU's\n"
++               "r = Send Reset Query  - Request all PDU's known to the cache\n"
++               "q = Quit the program\n"
++               "h = This screen\n"
++               "e = Send the last received PDU as error.\n");
+       default:
+         if (client.stop)
+         {
+--- /opt/project/NIST-BGP-SRx/srx-server/./src/server/ski_cache.c	2020-05-07 12:52:09.928785230 -0400
++++ ./src/server/ski_cache.c	2017-12-05 16:45:33.000000000 -0500
+@@ -1055,7 +1055,7 @@ static void _ski_parseBGPsec_PATH (_SKI_
+     stream += sizeof(SCA_BGP_PathAttribute);
+     // Contains the length of SecurePath and all Signature blocks.
+     u_int16_t remainder = 0;  
+-    if ((pathAttr->flags & BGP_UPD_A_FLAGS_EXT_LENGTH) == 0)
++    if ((pathAttr->flags & SCA_BGP_UPD_A_FLAGS_EXT_LENGTH) == 0)
+     {
+       remainder = *stream;
+       stream++;
+--- /opt/project/NIST-BGP-SRx/srx-server/./src/server/rpki_router_client.h	2020-05-07 12:52:09.928785230 -0400
++++ ./src/server/rpki_router_client.h	2017-12-05 16:45:32.000000000 -0500
+@@ -25,23 +25,13 @@
+  *
+  * Uses log.h for error reporting
+  *
+- * @version 0.5.0.4
++ * @version 0.5.1.0
+  *
+  * Changelog:
+  * -----------------------------------------------------------------------------
+- * 0.5.0.4  - 2018/03/07 - oborchert
+- *            * Fixed speller in documentation.
+- *            * Removed 'extern' from functions. 
+- *            * Removed functions getLastSentPDUType and getLastReceivedPDUType.
+- *          - 2018/03/06 - oborchert
+- *            * Removed debugCallback of 0.5.0.3 by separating it into two 
+- *              individual functions 1:debugRecCallback and 2:debugSendCallback.
+- * 0.5.0.3  - 2018/02/26 - oborchert
+- *            * Added parameter allowDowngrade. (part of fix for BZ1261)
+- *            * Added function pointer debugCallback
+- *            * Added function doPrintRPKI_to_RTR_PDU
+- *          - 2018/02/23 - oborchert
+- *            * Modified RPKIRouterClientParams.version from int to u_int8_t
++ * 0.5.1.0  - 2017/10/13 - oborchert
++ *            * Removed keyword extern from functions in header file.
++ *            * Removed backslash c from comments
+  * 0.5.0.0  - 2017/06/29 - oborchert
+  *            * Added more documentation to function headers.
+  *          - 2017/06/16 - kyehwanl
+@@ -99,8 +89,7 @@ typedef struct {
+    *                    cache state changes.
+    * @param sessionID   The cache sessionID entry for this data. It is be useful
+    *                    for sessionID changes in case SRx is implementing a
+-   *                    performance driven approach. This ID does not come from 
+-   *                    the prefix PDU, it is the stored value in the client.
++   *                    performance driven approach.
+    * @param isAnn       Indicates if this in an announcement or not.
+    * @param prefix      The prefix itself. Contains the information of v4/v6
+    * @param maxLen      the maximum length this white-list / ROA entry covers.
+@@ -199,75 +188,28 @@ typedef struct {
+    * @param errNo Error number all except 2 are fatal
+    * @param msg Error message
+    * @param user User data
+-   * @return \c true = keep the connection, \c false = close connection
++   * @return true = keep the connection, false = close connection
+    */
+   bool (*errorCallback)(uint16_t errNo, const char* msg, void* user);
+   
+   /**
+-   * An erroneous PDU was received.
+-   * 
+-   * @note Optional - can be NULL
+-   * 
+-   * @param len Length of the erroneous PDU
+-   * @param erronPDU The erroneus PDU
+-   * @param user USer Data
+-   * 
+-   * @return true = keep the connection, false = close the connection
+-   * 
+-   * @since 0.5.0.3
+-   */
+-  bool (*erronPDUCallback)(u_int32_t len, u_int8_t* erronPDU, void* user);
+-
+-  /**
+    * The connections was lost. The client will try to reconnect.
+    *
+-   * @note Optional - can be \c NULL
++   * @note Optional - can be NULL
+    *
+    * @param user User data
+-   * @return \c -1 = do not reconnect, otherwise wait sec and then try to
++   * @return -1 = do not reconnect, otherwise wait sec and then try to
+    *      reconnect to the server
+    */
+   int (*connectionCallback)(void* user);
+   // Server connection
+   
+-  /**
+-   * Allows to perform a debug callback prior processing the received PDU.
+-   * 
+-   * @note Optional - can be NULL
+-   * 
+-   * @param *user User data (commonly the client implementation itself
+-   * @param *pdu The received PDU
+-   * 
+-   * @return false if the PDU has a syntax or logical error.
+-   * 
+-   * @since 0.5.0.4
+-   */
+-  bool (*debugRecCallback)(void* user, RPKICommonHeader* pdu);  
+-
+-    /**
+-   * Allows to perform a debug callback prior processing the received PDU.
+-   * 
+-   * @note Optional - can be NULL
+-   * 
+-   * @param *user User data (commonly the client implementation itself
+-   * @param *pdu The received PDU
+-   * 
+-   * @return false if the PDU has a syntax or logical error.
+-   * 
+-   * @since 0.5.0.4
+-   */
+-  bool (*debugSendCallback)(void* user, RPKICommonHeader* pdu);  
+-
+   /** Set this variable to the server host name - not IP. */
+   const char* serverHost;
+   /** Set this variable to the server port number. */
+   int         serverPort;
+-  /** rtr-to-cache version info */
+-  u_int8_t    version;
+-  /** Allow downgrading to lower version number if signaled during session 
+-   * negotiation. 
+-   * @since 0.5.0.3 */
+-  bool        allowDowngrade;
++  /* rpki version info */
++  int         version;
+ } RPKIRouterClientParams;
+ 
+ /**
+@@ -276,22 +218,21 @@ typedef struct {
+  * @note Do not modify any of the variables!
+  */
+ typedef struct {
+-  /** This id MUST be unique within the application. It is the ID that 
+-   *  identifies the cache. */
+-  uint32_t                routerClientID;
++  /** This id MUST be unique within the application. */
++  uint8_t                  routerClientID;
+ 
+-  /** The Parameters of this client */
++  /** The Parameters of this clinet */
+   RPKIRouterClientParams* params;
+   /** */
+   void*                   user;
+ 
+-  /** The socket information. */
++  /** The socet information. */
+   ClientSocket            clSock;
+-  /** Indicates if the connection is stopped. */
++  /** Indicates if the sonnection is stopped. */
+   bool                    stop;
+   /** The worker thread for this connection. */
+   pthread_t               thread;
+-  /** The write mutex of this connection. */
++  /** The rwite mutex of this connection. */
+   Mutex                   writeMutex;
+   /** The last used serial number for this connection (in network order!). */
+   uint32_t                serial; // < Stored in network order
+@@ -317,14 +258,14 @@ typedef struct {
+    * without continuous polling.
+    * @since 0.5.0.0 */
+   bool                    stopAfterEndOfData;
+-  /** RTR-to-Cache protocol version info */
++  /* rpki version info */
+   int8_t                  version;
+ } RPKIRouterClient;
+ 
+ /**
+  * Create a unique router client ID
+  *
+- * @param self the router client the ID has to be generated for.
++ * @param self the router clinet the ID has to be generated for.
+  *
+  * @return the ID;
+  */
+@@ -334,13 +275,13 @@ uint32_t createRouterClientID(RPKIRouter
+  * Initializes a client and establishes a new connection to a server.
+  * This also sends a reset query.
+  *
+- * @note \c All variables of \c param need to be set
++ * @note All variables of  param need to be set
+  *
+  * @param self Client variable that will be initialized.
+  * @param params Pre-set parameters.
+  * @param routerClientID an ID that will be assigned to this RPKIRouterClient.
+- * @param user User data - will be passed to the callback functions
+- * @return \c true = successful, \c false = something failed
++ * @param user User data - will be passed to the call-backs
++ * @return true = successful, false = something failed
+  */
+ bool createRPKIRouterClient(RPKIRouterClient* client,
+                                    RPKIRouterClientParams* params,
+@@ -370,24 +311,21 @@ bool sendResetQuery(RPKIRouterClient* cl
+ bool sendSerialQuery(RPKIRouterClient* client);
+ 
+ /**
+- * Send an error report to the server.
++ * Returns the type of the last sent PDU.
+  * 
+- * @param self the instance of RPKI router client.
+- * @param errCode The error code to be used.
+- * @param erronPDU The PDU containing the error.
+- * @param lenErronPDU Length of the erroneous PDU.
+- * @param errText The administrative text message that accompanies the error.
+- * @param lenErrText The length of the text string.
+- * 
+- * @return true if the packet could be send successfully.
++ * @param client Client instance
++ * @return Type
++ */
++RPKIRouterPDUType getLastSentPDUType(RPKIRouterClient* client);
++
++/**
++ * Returns the type of the last received PDU.
+  * 
+- * @since 0.5.0.3
++ * @param client Client instance
++ * @return Type
+  */
+-bool sendErrorReport(RPKIRouterClient* self, u_int16_t errCode,
+-                            u_int8_t* erronPDU, u_int32_t lenErronPDU,
+-                            char* errText, u_int32_t lenErrText);
++RPKIRouterPDUType getLastReceivedPDUType(RPKIRouterClient* client);
+ 
+-// @TODO: fix this not so nice work around
+ int g_rpki_single_thread_client_fd;
+ 
+ void generalSignalProcess(void);
+--- /opt/project/NIST-BGP-SRx/srx-server/./src/server/console.c	2020-05-07 12:52:09.926785233 -0400
++++ ./src/server/console.c	2017-12-05 16:45:32.000000000 -0500
+@@ -20,13 +20,10 @@
+  * other licenses. Please refer to the licenses of all libraries required
+  * by this software.
+  *
+- * @version 0.5.0.3
++ * @version 0.5.0.1
+  *
+  * Changelog:
+  * -----------------------------------------------------------------------------
+- * 0.5.0.3  - 2018/02/23 - oborchert
+- *            * BZ1223: Resolved compiler warning. Added TODO into code where
+- *              revisit is necessary.
+  * 0.5.0.1  - 2017/08/29 - oborchert
+  *            * BZ1225: Function doShowCount did not use the correct internal 
+  *              commands.
+@@ -1557,8 +1554,7 @@ static void doShowUpdate(SRXConsole* sel
+   {
+     //SRxUpdateID updateID = atoll(showParam);
+     SRxUpdateID updateID = hexToInt(showParam);
+-    // TODO: Fix doShowCount call of incorrect data size 
+-    doShowCount(self, (char*)&updateID);
++    doShowCount(self, &updateID);
+   }
+   else
+   {
+--- /opt/project/NIST-BGP-SRx/srx-server/./src/server/rpki_router_client.c	2020-05-07 12:52:09.927785232 -0400
++++ ./src/server/rpki_router_client.c	2017-12-05 16:45:32.000000000 -0500
+@@ -22,28 +22,13 @@
+  *
+  * Provides the code for the SRX-RPKI router client connection.
+  *
+- * @version 0.5.0.5
++ * @version 0.5.1.0
+  *
+  * Changelog:
+  * -----------------------------------------------------------------------------
+- * 0.5.0.5  - 2018/04/24 - oborchert
+- *            * Added missing code in error handling.
+- * 0.5.0.4  - 2018/03/07 - oborchert
+- *            * Modified packet handling and added proper error handling and
+- *              version handshake, 
+- *            * Added internal error defines (RRC_.....)
+- *            * Completed missing documentation.
+- *            * Added documentation and removed inline from getLastSendPDU and 
+- *              getLastReceivedPDU.
+- *            * Fixed incorrect error code printing and streamlined the code in 
+- *              method method handleErrorReport (-1 return value was rubbish).
+- *            * Removed functions getLastSentPDUType and getLastReceivedPDUType
+- * 0.5.0.3  - 2018/02/26 - oborchert
+- *            * Added function wrapper _sendPDU to encapsulate allow debugging
+- *              debugging of sending packets.
+- *            * Added rpki_packet_printer header file.
+- *          - 2018/02/23 - oborchert
+- *            * Removed unnecessary code form sendResetQuery
++ * 0.5.1.0  - 2017/10/13 - oborchert
++ *            * Temporarily modified hard coded return value of function 
++ *              createRouterClientID from 0 to 1.
+  * 0.5.0.1  - 2017/10/01 - oborchert
+  *            * Fixed compiler warning
+  * 0.5.0.0  - 2017/06/29 - oborchert
+@@ -84,7 +69,6 @@
+ #include <signal.h>
+ #include "server/rpki_queue.h"
+ #include "server/rpki_router_client.h"
+-#include "server/rpki_packet_printer.h"
+ #include "util/client_socket.h"
+ #include "util/log.h"
+ #include "util/socket.h"
+@@ -93,23 +77,12 @@
+ 
+ #define HDR "([0x%08X] RPKI Router Client): "
+ 
+-// Error codes for function receive PDU
+-#define RRC_RCV_PDU_NO_ERROR     -1
+-#define RRC_RCV_PDU_SOCKET_ERROR -2
+-#define RRC_RCV_PDU_MEMORY_ERROR -3
+-
+-// Define a default string length
+-#define RRC_MAX_STRING 255
+-// Maximum errors during PDU processing
+-#define RRC_MAX_ERRCT  10
+-
+ /**
+  * Handle received IPv4 Prefixes.
+  *
+  * @param client The router client instance.
+  * @param hdr the IPv4 prefix header.
+- * 
+- * @return true if the IPv4 prefix could be properly processed.
++ * @return
+  */
+ static bool handleIPv4Prefix(RPKIRouterClient* client,
+                              RPKIIPv4PrefixHeader* hdr)
+@@ -168,15 +141,12 @@ static bool handleIPv6Prefix(RPKIRouterC
+ }
+ 
+ /**
+- * This function is a wrapper for handling the received error pdu. 
+- * In case the client does not provide an additional error handler, this
+- * function will print the received error code, the error message and return
+- * the specified return values according to the quick processing of the packet. 
++ * Handles the receipt of an error pdu. The encapsulated PDU is ignored,
++ * the error message will be printed though.
+  *
+- * @param client This client
+- * @param hdr The received error PDU
+- * 
+- * @return 0: stay connected, 1: disconnect
++ * @param client Client
++ * @param hdr PDU header
++ * @return \c 0 = stay connected, \c 1 = disconnect, \c -1 = socket error
+  */
+ static int handleErrorReport(RPKIRouterClient* client,
+                              RPKIErrorReportHeader* hdr)
+@@ -184,29 +154,40 @@ static int handleErrorReport(RPKIRouterC
+   uint32_t  epduLen = ntohl(hdr->len_enc_pdu);
+   // Go to the message portion
+   uint8_t*  messagePtr = (uint8_t*)hdr+12+epduLen;
+-  // Retrieve the messageLen
++  // Set the messageLen
+   uint32_t  msgLen = ntohl(*(uint32_t*)messagePtr);
+-  char      errorStr[msgLen+1];
+-  u_int16_t error_number = ntohs(hdr->error_number);
++  char     msgStr[msgLen+1];
++  int returnVal = (hdr->error_number == 2) ? 0 : 1; // all except 2 are fatal!
+   
+-  // all except RPKI_EC_NO_DATA_AVAILABLE (2) are fatal!
+-  int returnVal = (error_number == RPKI_EC_NO_DATA_AVAILABLE) ? 0 : 1; 
++  // Zero terminate message String
++  msgStr[msgLen] = '\0';
++  // read the Message:
++  int idx=0;
++  // fill the string
++  for (;idx < msgLen; idx++)
++  {
++    msgStr[idx] = *(messagePtr+4+idx);
++  }
++  // Read the error pdu
+ 
+-  //Initialize and fill the message String
+-  memset (errorStr, '\0', msgLen+1);
+-  messagePtr += 4;
+-  memcpy (errorStr, messagePtr, msgLen);
+ 
+   if (client->params->errorCallback != NULL)
+   {
+     // Pass the code and message to the error callback of this connection
+-    returnVal = (client->params->errorCallback(error_number, errorStr, 
+-                                               client->user)) ? 0 : 1;
++    if (client->params->errorCallback(ntohs(hdr->error_number), msgStr,
++                                      client->user))
++    {
++      returnVal = 0;
++    }
++    else
++    {
++      returnVal = 1;
++    }
+   }
+   else
+   {
+-    LOG(LEVEL_INFO, "ERROR RECEIVING ERROR-PDU type:%d, msg:'%s'!", 
+-                    error_number, errorStr);
++    LOG(LEVEL_INFO, "ERROR RECEIVING ERROR-PDU type:%d!", hdr->error_number);
++    returnVal = -1;
+   }
+ 
+   return returnVal;
+@@ -263,38 +244,6 @@ static void handleEndOfData(RPKIRouterCl
+ }
+ 
+ /**
+- * This function checks the version number between the client and the cache.
+- * If the session is still in negotiation stage and the client can downgrade to
+- * successfully negotiate the session, the client version number will be 
+- * downgraded. If not and the versions differ this function returns false.
+- * 
+- * @param client This client. 
+- * @param version The version of the peer
+- * 
+- * @return true if the communication can be continued.
+- * 
+- * @since 0.5.0.3
+- */
+-static bool checkVersion(RPKIRouterClient* client, u_int8_t version)
+-{
+-  if (client->version != version)
+-  {
+-    // Check the startup stage
+-    if (client->startup)
+-    {
+-      // In case client(self) has a higher version than the requested one
+-      // but can downgrade, then downgrade to peers version.
+-      if (  (client->version > version) && client->params->allowDowngrade)
+-      {
+-        client->version = version;
+-      }
+-    }
+-  }
+-  
+-  return client->version == version;
+-}
+-
+-/**
+  * Verify that the cache session id is correct. In case the cache session id is
+  * incorrect == changed the flag session id_changed will be set to true. The old
+  * session id value will be preserved to allow referencing old values.
+@@ -330,59 +279,68 @@ static bool checkSessionID(RPKIRouterCli
+ }
+ 
+ /**
+- * Read the next packet from the socket into the provided buffer. In case the 
+- * buffer is not of sufficient size, the buffer will be extended.
+- * 
+- * In case of an internal error receiving the PDU the returned length can be 
+- * less then the length field of the PDU indicates. In this case the errCode
+- * contains an erorr.
+- * 
+- * The following errors can be reported:
++ * This method implements the receiver thread between the RPKI client and
++ * RPKI server. It reads each PDU completely.
+  * 
+- *     RRC_RCV_PDU_NO_ERROR:       No error
+- *     RRC_RCV_PDU_SOCKET_ERROR:   Somehwo not all data could be loaded.
+- * 
+- * @param client The client session
+- * @param errCode Returns the error code.
+- * @param buffer The buffer to be filled.
+- * @param buffSize The max size of the buffer.
+- * 
+- * @return 0 or the number of bytes received (can be less then the PDU length).
++ * @param client The client connection to the RPKI router.
++ * @param returnAterEndOfData Allows to exit the function once an end of data
++ *                            is received. This is used during cache session id
++ *                            change where the cache is reloaded.
+  */
+-static u_int32_t _getPacket(RPKIRouterClient* client, int* errCode, 
+-                            uint8_t** buffer, uint32_t* buffSize)
++static void receivePDUs(RPKIRouterClient* client, bool returnAterEndOfData)
++{
++  RPKICommonHeader* hdr;  // A pointer to the Common header.
++  uint32_t          pduLen;
++  uint8_t*          byteBuffer;
++  uint8_t*          bufferPtr;
++  uint32_t          bytesMissing;
++  // Use the "maximum" header. It can grow in case an error pdu is received
++  // with a large error message or a PDU included or both. In this case the
++  // memory will be extended to the space needed. In case the space can not be
++  // extended, the PDU will be loaded as much as possible and the rest will be
++  // skipped.
++  uint32_t         bytesAllocated = sizeof(RPKIRouterKeyHeader);
++  // Keep going is used to keep the received thread up and running. It will be
++  // set false once the connection is shut down.
++  bool             keepGoing = true;
++
++  // Allocate the message buffer
++  byteBuffer = malloc(bytesAllocated);
++  // Set the bufferPtr to the position where the remaining data has be loaded
++  // into.
++  bufferPtr = (byteBuffer + sizeof(RPKICommonHeader));
++  if (!byteBuffer)
+ {
+-  uint32_t pduLen       = 0;
+-  uint32_t bytesMissing = 0;
+-  uint8_t* bufferPtr    = *buffer + sizeof(RPKICommonHeader);
+-  RPKICommonHeader* hdr = (RPKICommonHeader*)*buffer;
+-  
+-  // Initialize the values.
+-  memset (*buffer, 0, *buffSize);
+-  *errCode = RRC_RCV_PDU_NO_ERROR;
++    RAISE_ERROR("Could not allocate enough memory to read from socket!");
++    return;
++  }
+   
++  // KeepGoing until a cache session id changed / in case of connection loss,
++  // a break stops this while loop.
++  while (keepGoing)
++  {
+   // Read the common data for the Common header. This method fails in case the
+   // connection is lost.
+-  if (!recvNum(getClientFDPtr(&client->clSock), *buffer,
++    if (!recvNum(getClientFDPtr(&client->clSock), byteBuffer,
+                               sizeof(RPKICommonHeader)))
+   {
+     LOG(LEVEL_DEBUG, HDR "Connection lost!", pthread_self());
+-    *errCode  = RRC_RCV_PDU_SOCKET_ERROR;
++      break;
+   }
+-  else
+-  {
++
++    hdr = (RPKICommonHeader*)byteBuffer;
+     // retrieve the actual size of the message. In case more needs to be loaded
+     // it will be done.
+     pduLen = ntohl(hdr->length);
+     if (pduLen < sizeof(RPKICommonHeader))
+     {
+-      LOG(LEVEL_DEBUG, HDR "Corrupted RPKI-RTR PDU: Size!", pthread_self());
+-      *errCode  = RPKI_EC_CORRUPT_DATA;
+-    }    
++      LOG(LEVEL_DEBUG, HDR "Received an invalid RPKI-RTR PDU!", pthread_self());
++      break;
+   }
++    LOG(LEVEL_DEBUG, HDR "Received RPKI-RTR PDU[%d]", pthread_self(),
++                     hdr->type);
+   
+-  if (*errCode == RRC_RCV_PDU_NO_ERROR)
+-  {      
++/////////////////////////////////////////
+     // Determine how much data is still missing
+     bytesMissing = pduLen - sizeof(RPKICommonHeader);
+ 
+@@ -390,209 +348,64 @@ static u_int32_t _getPacket(RPKIRouterCl
+     if (bytesMissing > 0)
+     {
+       // Check if the current buffer is big enough
+-      if (bytesMissing > *buffSize)
++      if (bytesMissing > bytesAllocated)
+       {
+         // The current buffer is to small -> try to increase it.
+-        uint8_t* newBuffer = realloc(*buffer, *buffSize);
++        uint8_t* newBuffer = realloc(byteBuffer, bytesMissing);
+         if (newBuffer)
+         {
+-          *buffer   = newBuffer; // reset to the bigger space
+-          *buffSize = bytesMissing;
+-          bufferPtr = (*buffer + sizeof(RPKICommonHeader));
++          byteBuffer = newBuffer; // reset to the bigger space
++          bytesAllocated = bytesMissing;
++          bufferPtr = (byteBuffer + sizeof(RPKICommonHeader));
+         }
+         else
+         {
+           // can only happen in case it is an error packet that contains an
+           // erroneous PDU or extreme large error text.
+-          LOG(LEVEL_ERROR, "Invalid PDU length : type=%d, length=%u, "
+-                           "data-size=%u", hdr->type, pduLen, bytesMissing);
++          RAISE_ERROR("Invalid PDU length : type=%d, length=%u, data-size=%u",
++                      hdr->type, pduLen, bytesMissing);
+ 
+-          // Try to skip over the data
++          // Skip over the data
+           if (!skipBytes(&client->clSock, bytesMissing))
+           {
+-            LOG(LEVEL_ERROR, "While reading a corrupted PDU, could not skip "
+-                             "over the remainig data");
++            break;
+           }
+-          *errCode = RPKI_EC_CORRUPT_DATA;
+         }
+       }
+ 
+       // Now load the remaining data
+-      if (*errCode == RRC_RCV_PDU_NO_ERROR)
+-      {
+         if (!recvNum(getClientFDPtr(&client->clSock), bufferPtr, bytesMissing))
+         {
+-          *errCode = RRC_RCV_PDU_SOCKET_ERROR; 
+-          pduLen -= bytesMissing;
+-        }
+-      }
+-    }
+-  }
+-  
+-  return pduLen;
+-}
+-
+-/**
+- * This method implements the receiver loop between the RPKI client and
+- * RPKI server. It reads and processes each PDU completely. It does NOT 
+- * close the socket on return.
+- * 
+- * The following error codes can be returned:
+- *   RPKI_EC_...: All RPKI error codes 0..255
+- *   RRC_RCV_PDU_NO_ERROR:     No Error
+- *   RRC_RCV_PDU_SOCKET_ERROR: Socket Error
+- *   RRC_RCV_PDU_MEMORY_ERROR: Memory Error
+- *
+- * @param client The client connection to the RPKI router.
+- * @param returnAterEndOfData Allows to exit the function once an end of data
+- *                            is received. This is used during cache session id
+- *                            change where the cache is reloaded.
+- * @param errCode -3: Memory Error, -2: Socket error, -1: NO ERROR, 
+- *                0..n RPKI_EC_... errors
+- * @param singlePoll if true only one single packet will be processed. This 
+- *                   allows to properly process a handshake.
+- * 
+- * @return true if all went well, false if an ERROR occurred.
+- */
+-static bool receivePDUs(RPKIRouterClient* client, bool returnAterEndOfData, 
+-                        int* errCode, bool singlePoll)
+-{
+-  RPKICommonHeader* hdr        = NULL;  // A pointer to the Common header.
+-  uint32_t          pduLen     = 0;
+-  // Use the "maximum" header. It can grow in case an error pdu is received
+-  // with a large error message or a PDU included or both. In this case the
+-  // memory will be extended to the space needed. In case the space can not be
+-  // extended, the PDU will be loaded as much as possible and the rest will be
+-  // skipped.
+-  uint32_t         bytesAllocated = sizeof(RPKIRouterKeyHeader);
+-  uint8_t*         byteBuffer = malloc(bytesAllocated);
+-  // Keep going is used to keep the received thread up and running. It will be
+-  // set false once the connection is shut down.
+-  bool             keepGoing   = !client->stop;
+-  
+-  if (byteBuffer != NULL)
+-  {
+-    // Reset the error code to NO ERROR
+-    *errCode = RRC_RCV_PDU_NO_ERROR;
+-  }
+-  else
+-  {
+-    RAISE_ERROR("Could not allocate enough memory to read from socket!");
+-    *errCode  = RRC_RCV_PDU_MEMORY_ERROR;
+-    keepGoing = false;
++        break;
+   }
+-
+-  // KeepGoing until a cache session id changed / in case of connection loss,
+-  // a break stops this while loop.
+-  while (keepGoing && !client->stop)
+-  {
+-    // If singlePoll is selected, stop after this poll.
+-    keepGoing = !singlePoll;
+-    
+-    pduLen = _getPacket(client, errCode, &byteBuffer, &bytesAllocated);
+-    if (!pduLen)
+-    {
+-      keepGoing = false;
+-      continue;
+     }
+-    hdr = (RPKICommonHeader*)byteBuffer;
++/////////////////////////////////////////
++    client->lastRecv = hdr->type;
+     
+     LOG(LEVEL_DEBUG, HDR "Received RPKI-RTR PDU[%u] length=%u\n",
+                      pthread_self(), hdr->type, ntohl(hdr->length));
+ 
+-    // This is for printing received PDU's
+-    if (client->params->debugRecCallback != NULL)
+-    {
+-      printf ("Received Packet:\n");
+-      client->params->debugRecCallback(client, hdr);
+-    }
+-    
+-    // Check if a version conflict exist. During negotiation this method might 
+-    // downgrade the protocol.
+-    if (!checkVersion(client, hdr->version))
+-    {
+-      // Check if the cache has a higher unsupported version or if the
+-      // cache or client only supports version 0. In both cases use 
+-      // UNSUPPORTED, otherwise use UNEXPECTED (version 1+)
+-      *errCode = ((hdr->version > RPKI_RTR_PROTOCOL_VERSION)
+-                  || (client->version == 0))
+-                 ? RPKI_EC_UNSUPPORTED_PROT_VER
+-                 : RPKI_EC_UNEXPECTED_PROTOCOL_VERSION;
+-      
+-      // the router and cache might still be in handshake
+-      if (client->startup)
+-      {
+-        // Still in session establishment RFC8210 Section 7
+-        // Following RFC 8210 Section 7 the cache responded with a lower version.        
+-        if (client->params->allowDowngrade)
+-        {
+-          // 1st. let us downgrade and then decide what to do next.
+-          LOG(LEVEL_NOTICE, "Cache responded with a version %u PDU, the "
+-                            "'router' can downgrade.", hdr->version);
+-          client->version = hdr->version;
+-          
+-          // 2nd, check if we can continue processing or if we need to stop 
+-          // here.
+-        }
+-        else
+-        {
+-          LOG(LEVEL_NOTICE, "Cache responded with a version %u PDU, the "
+-                            "'router' cannot downgrade.", hdr->version);
+-        }
+-        
+-        // In case the cache did not respond with an error PDU, let's accept 
+-        // this PDU by clearing the error and continue processing.
+-        if (hdr->type != PDU_TYPE_ERROR_REPORT)
+-        {
+-          *errCode = RRC_RCV_PDU_NO_ERROR;
+-        }
+-      }
+-      
+-      // Error is not cleared, register the PDU as last received and end loop
+-      if (*errCode != RRC_RCV_PDU_NO_ERROR)
+-      {
+-        // Stop loop of receiving data
+-        client->lastRecv = hdr->type;
+-        keepGoing = false;
+-        continue;
+-      }  
+-    }
++    // Is needed in PDU_TYPE_ERROR_REPORT
++    int ret;
+         
+     // Handle the data depending on the type
+-    u_int32_t sessionID = 0;
+     switch (hdr->type)
+     {
+       case PDU_TYPE_SERIAL_NOTIFY :
+         // Respond with a serial query
+-        sessionID = ((RPKISerialNotifyHeader*)hdr)->sessionID;
+-        if (checkSessionID(client, sessionID))
++        if (checkSessionID(client, ((RPKISerialNotifyHeader*)hdr)->sessionID))
+         {
+           sendSerialQuery(client);
+         }
+         else
+         {
+-          // incorrect session ID 
+           keepGoing = false;
+-          *errCode = RPKI_EC_CORRUPT_DATA;
+         }
+         break;
+       case PDU_TYPE_CACHE_RESPONSE :
+-        sessionID = ((RPKICacheResponseHeader*)hdr)->sessionID;
+-        if (!checkSessionID(client, sessionID))
+-        {
+-          client->sessionIDChanged = true;
+-          // Mark the clients cache DB as stale.
+-          client->params->sessionIDChangedCallback(client->routerClientID, 
+-                                                   sessionID);
+-          // @TODO: Fix Session ID. 
+-          // Only in case the previous message was a "Request Query" the session
+-          // ID is allowed to change. RFC8210 5.5 2nd paragraph
+-          if (client->lastSent != PDU_TYPE_CACHE_RESET)
+-          {
+-            keepGoing = false;
+-            *errCode = RPKI_EC_CORRUPT_DATA;
+-          }
+-        }
++        keepGoing = checkSessionID(client,
++                               ((RPKICacheResponseHeader*)hdr)->sessionID);
++        // No need to do anything
+         break;
+       case PDU_TYPE_IP_V4_PREFIX :
+         handleIPv4Prefix(client, (RPKIIPv4PrefixHeader*)byteBuffer);
+@@ -601,33 +414,21 @@ static bool receivePDUs(RPKIRouterClient
+         handleIPv6Prefix(client, (RPKIIPv6PrefixHeader*)byteBuffer);
+         break;
+       case PDU_TYPE_END_OF_DATA :
+-        sessionID = ((RPKIEndOfDataHeader*)hdr)->sessionID;
+-        if (checkSessionID(client, sessionID))
++        if (checkSessionID(client, ((RPKIEndOfDataHeader*)hdr)->sessionID))
+         {
+           // store not byte-swapped
+           client->serial = ((RPKIEndOfDataHeader*)byteBuffer)->serial;
+           // Now process the RPKI_QUEUE
+           handleEndOfData(client, (RPKIEndOfDataHeader*)byteBuffer);
+-          // Stop the client is only one data poll is to be done.
+-          // Replace client-stop with keepGoing
+           keepGoing = !returnAterEndOfData;
+         }
+         else
+         {
+           keepGoing = false;
+-          *errCode  = RPKI_EC_CORRUPT_DATA; 
+         }
+         break;
+       case PDU_TYPE_ROUTER_KEY:
+-        if (client->version != 0)
+-        {
+           handlePDURouterKey(client, (RPKIRouterKeyHeader*)byteBuffer);
+-        }
+-        else
+-        {
+-          *errCode = RPKI_EC_UNSUPPORTED_PDU;
+-          keepGoing = false;
+-        }
+         break;
+       case PDU_TYPE_CACHE_RESET :
+         // Reset our cache
+@@ -636,82 +437,29 @@ static bool receivePDUs(RPKIRouterClient
+         sendResetQuery(client);
+         break;
+       case PDU_TYPE_ERROR_REPORT :
+-        // Switched from client-stop to keepGoing
+-        keepGoing = !handleErrorReport(client, 
+-                                       (RPKIErrorReportHeader*)byteBuffer);
+-        break;
+-      case PDU_TYPE_RESERVED :
+-        LOG(LEVEL_ERROR, "Received reserved RPKI-PDU Type %u", 
+-            PDU_TYPE_RESERVED);
+-        *errCode  = RPKI_EC_UNSUPPORTED_PDU;
+-        keepGoing = false;
+-        break;
+-      default :
+-        // We handled all known types already
+-        LOG(LEVEL_ERROR, "Unsupported RPKI-PDU Type %u", hdr->type);
+-        *errCode  = RPKI_EC_UNSUPPORTED_PDU;
+-        keepGoing = false;
+-    }
+-    // Set the last received PDU
+-    client->lastRecv = hdr->type;
+-  }
+-  
+-  // Now do error handling but only if not in handshake mode.
+-  if ((!client->startup) && (*errCode != RRC_RCV_PDU_NO_ERROR))
++        ret = handleErrorReport(client, (RPKIErrorReportHeader*)byteBuffer);
++        if (ret != 0)
+   {
+-    char errStr[RRC_MAX_STRING];
+-    memset(errStr, '0', RRC_MAX_STRING);
+-
+-    if (*errCode == RRC_RCV_PDU_MEMORY_ERROR)
++          if (ret == 1)
+     {
+-      *errCode = RPKI_EC_INTERNAL_ERROR;
+-      LOG(LEVEL_ERROR, "Not enough memory!");      
++            // BZ599 - Changed typecase from (int) to (uintptr_t) to prevent
++            // compiler warnings and other nasty side affects while compiling
++            // on 32 and 64 bit OS.
++            close((uintptr_t)getClientFDPtr(&client->clSock));
++          }
++          return;
+     }
+-    
+-    switch (*errCode)
+-    {
+-      case RPKI_EC_CORRUPT_DATA:
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_CORRUPT_DATA);
+-        break;
+-      case RPKI_EC_NO_DATA_AVAILABLE:
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_INTERNAL_ERROR);
+-        break;
+-      case RPKI_EC_INVALID_REQUEST:
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_INVALID_REQUEST);
+-        break;
+-      case RPKI_EC_UNSUPPORTED_PROT_VER:
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_UNSUPPORTED_PROT_VER);
+-        break;
+-      case RPKI_EC_UNSUPPORTED_PDU:
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_UNSUPPORTED_PDU);
+-        break;
+-      case RPKI_EC_UNKNOWN_WITHDRAWL:
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_UNKNOWN_WITHDRAWL);
+-        break;
+-      case RPKI_EC_DUPLICATE_ANNOUNCEMENT:
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_DUPLICATE_ANNOUNCEMENT);
+-        break;
+-      case RPKI_EC_UNEXPECTED_PROTOCOL_VERSION:
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_UNEXPECTED_PROTOCOL_VERSION);
+         break;
+-      case RPKI_EC_RESERVED:
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_RESERVED);
++      case PDU_TYPE_RESERVED :
++        LOG(LEVEL_ERROR, "Received reserved RPKI-PDU Type 255");
+         break;        
+-      case RPKI_EC_INTERNAL_ERROR:
+       default:
+-        *errCode = RPKI_EC_INTERNAL_ERROR;
+-        snprintf (errStr, RRC_MAX_STRING, "%s", RPKI_ESTR_INTERNAL_ERROR);
+-        break;
++        // We handled all known types already
++        LOG(LEVEL_ERROR, "Unknown/unexpected RPKI-PDU Type %u", hdr->type);
+     }
+-    
+-    sendErrorReport(client, *errCode, (uint8_t*)hdr, pduLen, 
+-                    errStr, strlen(errStr));
+   }
+-  
+   // Release the buffer again.
+   free(byteBuffer);
+-  
+-  return *errCode == RRC_RCV_PDU_NO_ERROR;
+ }
+ 
+ 
+@@ -735,9 +483,6 @@ static void* manageConnection (void* cli
+ {
+   RPKIRouterClient* client = (RPKIRouterClient*)clientPtr;
+   int               sec;
+-  int               errCode;
+-  // Counter for errors 
+-  int errCount = 0;
+ 
+   struct sigaction act;
+   sigset_t errmask;
+@@ -762,52 +507,19 @@ static void* manageConnection (void* cli
+       // is either lost, closed, or the end of data is received (single request)
+       // Modified call with 0.5.0.0 to use variable as second parameter rather
+       // than false
+-      receivePDUs(client, client->stopAfterEndOfData, &errCode, true);      
+-      // Check the expected response, 
+-      switch (client->lastRecv)
+-      {
+-        case PDU_TYPE_CACHE_RESPONSE:
+-          // Now, keep on going and receive data.
+-          receivePDUs(client, client->stopAfterEndOfData, &errCode, false);
+-
++      receivePDUs(client, client->stopAfterEndOfData);
+           if (client->stopAfterEndOfData)
+           {
+             client->stop = true;
+           }
+-          break;
+-        case PDU_TYPE_ERROR_REPORT:
+-          // Most likely an error regarding the version number, keep on going if 
+-          // we can downgrade the version (and only if)
+-          LOG(LEVEL_DEBUG, "Version conflict registered. ");
+-          switch (errCode)
+-          {
+-            case RPKI_EC_UNSUPPORTED_PROT_VER:
+-            case RPKI_EC_UNEXPECTED_PROTOCOL_VERSION:
+-              // Stop if client was not allowed to downgrade.
+-              client->stop = !client->params->allowDowngrade;
+-              break;
+-            default:
+-              LOG(LEVEL_DEBUG, "PDU receive error[%u]!", errCode);
+-              errCount++;
+-              if (errCount >= RRC_MAX_ERRCT)
+-              {
+-                LOG(LEVEL_ERROR, "Experienced %u errors during receiving PDU's"
+-                                 ", Stop client!", errCount);
+-                client->stop = true;
+-              }
+-          }
+-          break;
+-        default:
+-          RAISE_ERROR("Unexpected protocol behavior!");
+-          client->stop = true;
+-      }
+     }
+ 
++    // The connection is lost or did not even exist yet.
++
+     // Test if the connection stopped!
+     if (client->stop)
+     {
+       LOG(LEVEL_DEBUG, HDR "Client Connection was stopped!", pthread_self());
+-      close((uintptr_t)getClientFDPtr(&client->clSock));
+       break;
+     }
+ 
+@@ -819,8 +531,6 @@ static void* manageConnection (void* cli
+ 
+     if (sec == -1)
+     { // Stop trying to re-establish the connection
+-      client->stop = true;
+-      close((uintptr_t)getClientFDPtr(&client->clSock));
+       pthread_exit((void*)1);
+     }
+ 
+@@ -830,8 +540,7 @@ static void* manageConnection (void* cli
+       client->startup = true;
+     }
+ 
+-    // Now try to reconnect if not stopped.
+-    client->clSock.reconnect = !client->stop;
++    // Now try to reconnect.
+     reconnectToServer(&client->clSock, sec, MAX_RECONNECTION_ATTEMPTS);
+ 
+     // See if the session_id changed!
+@@ -859,7 +568,7 @@ static void* manageConnection (void* cli
+         // Receive and process all PDUs. The flag client->session_id_changed
+         // is already set to false.
+         LOG (LEVEL_DEBUG, "SESSION ID CHANGE: RECEIVE DATA", pthread_self());
+-        receivePDUs(client, true, &errCode, false);
++        receivePDUs(client, true);
+       }
+       LOG (LEVEL_DEBUG, "SESSION ID CHANGE: DATA ESTABLISHED", pthread_self());
+       if (client->params->sessionIDEstablishedCallback != NULL)
+@@ -889,7 +598,9 @@ static void* manageConnection (void* cli
+ uint32_t createRouterClientID(RPKIRouterClient* self)
+ {
+   // TODO: Add implementation for a unique ID. Maybe an initial hash over self.
+-  return 0;
++  // BZ1239: For now use hard coded value 1. This ID is used for registering 
++  // keys and 0 is reserved within SCA.
++  return 1;
+ }
+ 
+ /**
+@@ -987,41 +698,6 @@ void releaseRPKIRouterClient (RPKIRouter
+ }
+ 
+ /**
+- * Wrapper for function sendNum. This wrapper does call the debugCallback in 
+- * case it is specified. The call will only be done if the call to sendNum was
+- * successful.
+- *  
+- * @param client The RPKI Router Client (this)
+- * @param hdr The header to be send.
+- * 
+- * @return true if the packed was send, otherwise false.
+- * 
+- * @since 0.5.0.3 
+- */
+-static bool _sendPDU(RPKIRouterClient* client, RPKICommonHeader* hdr)
+-{
+-  bool succ = sendNum(getClientFDPtr(&client->clSock), hdr, ntohl(hdr->length)); 
+-  if (succ)
+-  {
+-    client->lastSent = hdr->type;
+-  }
+-  if (client->params->debugSendCallback != NULL)
+-  {
+-    printf("Sending packet:");
+-    if (succ)
+-    {
+-      printf("\n");
+-      client->params->debugSendCallback(client, hdr);
+-    }
+-    else
+-    {
+-      printf (" failed!\n");
+-    }
+-  }
+-  return succ;
+-}
+-
+-/**
+  * Send a RESET QUERY to the validation cache to re-request the complete
+  * data
+  *
+@@ -1044,9 +720,16 @@ bool sendResetQuery (RPKIRouterClient* s
+     hdr.length   = htonl(sizeof(RPKIResetQueryHeader));
+ 
+     lockMutex(&self->writeMutex);
++    self->lastSent = PDU_TYPE_RESET_QUERY;
+ 
+-    succ = _sendPDU (self, (RPKICommonHeader*)&hdr);
+-    if (!succ)
++    succ = sendNum (getClientFDPtr(&self->clSock), &hdr,
++                    sizeof(RPKIResetQueryHeader));
++
++    if (succ)
++    {
++      self->lastSent = PDU_TYPE_RESET_QUERY;
++    }
++    else
+     {
+       // TODO: Maybe just close the old socket and set both to -1
+       // The socket was not closed but the FD was set to -1. reset it to allow
+@@ -1064,66 +747,6 @@ bool sendResetQuery (RPKIRouterClient* s
+ }
+ 
+ /**
+- * Send an error report to the server.
+- * 
+- * @param self the instance of rpki router client.
+- * @param errCode The error code to be used.
+- * @param erronPDU The PDU containing the error.
+- * @param lenErronPDU Length of the erroneous PDU (host format).
+- * @param errText The administrative text message that accompanies the error.
+- * @param lenErrText Th length of the text string (host format).
+- * 
+- * @return true if the packet could be send successfully.
+- * 
+- * @since 0.5.0.3
+- */
+-bool sendErrorReport(RPKIRouterClient* self, u_int16_t errCode,
+-                     u_int8_t* erronPDU, u_int32_t lenErronPDU,
+-                     char* errText, u_int32_t lenErrText)
+-{
+-  u_int32_t totalLen = sizeof(RPKIErrorReportHeader) + lenErronPDU
+-                       + (4 + lenErrText);  // 4 byte for length field + text
+-  bool  succ = false;
+-
+-  if (self->clSock.clientFD != -1)
+-  {
+-    u_int8_t* buff = malloc(totalLen);
+-    memset(buff, 0, totalLen);
+-    u_int32_t* hdr_len_err_txt = NULL;
+-    RPKIErrorReportHeader* hdr = (RPKIErrorReportHeader*)buff;
+-    hdr->version      = self->version;
+-    hdr->type         = PDU_TYPE_ERROR_REPORT;
+-    hdr->error_number = htons(errCode);
+-    hdr->length       = htonl(totalLen);
+-    hdr->len_enc_pdu  = htonl(lenErronPDU);
+-    // Move buffer to position of error PDU
+-    buff += sizeof(RPKIErrorReportHeader);
+-    memcpy(buff, erronPDU, lenErronPDU);
+-    buff += lenErronPDU;
+-    hdr_len_err_txt  = (u_int32_t*)buff;
+-    *hdr_len_err_txt = htonl(lenErrText);
+-    buff += sizeof(u_int32_t);
+-    memcpy(buff, errText, lenErrText); 
+-    // Set buffer back to start of header; 
+-    buff = (u_int8_t*)hdr;
+-
+-    lockMutex(&self->writeMutex);
+-    LOG(LEVEL_DEBUG, HDR "Sending Serial Query...\n", pthread_self());
+-
+-    succ  = _sendPDU(self, (RPKICommonHeader*)hdr); 
+-    unlockMutex(&self->writeMutex);
+-
+-    memset(buff, 0, totalLen);
+-    free(buff);
+-
+-    buff = NULL;
+-    hdr  = NULL;
+-  }
+-   
+-  return succ;
+-}
+-
+-/**
+  * Send a SERIAL QUERY to the rpki validation cache. The sessionID and serial
+  * number are extracted of the router client itself.
+  *
+@@ -1134,27 +757,40 @@ bool sendErrorReport(RPKIRouterClient* s
+ bool sendSerialQuery (RPKIRouterClient* self)
+ {
+   RPKISerialQueryHeader hdr;  
+-  bool  succ = false;
+-
+-  if (self->clSock.clientFD != -1)
+-  {
+     hdr.version   = self->version;
+     hdr.type      = PDU_TYPE_SERIAL_QUERY;
+     hdr.sessionID = self->sessionID;
+     hdr.length    = htonl(sizeof(RPKISerialQueryHeader));
+     hdr.serial    = self->serial;
+ 
++  bool succ  = false;
++
+     lockMutex(&self->writeMutex);
+     LOG(LEVEL_DEBUG, HDR "Sending Serial Query...\n", pthread_self());
+ 
+-    succ  = _sendPDU(self, (RPKICommonHeader*)&hdr);
+-    unlockMutex(&self->writeMutex);
++  if (sendNum(getClientFDPtr(&self->clSock), &hdr,
++              sizeof(RPKISerialQueryHeader)))
++  {
++    self->lastSent = PDU_TYPE_SERIAL_QUERY;
+   }
++  unlockMutex(&self->writeMutex);
+ 
+   return succ;
+ }
+ 
+ //TODO: Documentation missing
++inline RPKIRouterPDUType getLastSentPDUType(RPKIRouterClient* self)
++{
++  return self->lastSent;
++}
++
++//TODO: Documentation missing
++inline RPKIRouterPDUType getLastReceivedPDUType(RPKIRouterClient* self)
++{
++  return self->lastRecv;
++}
++
++//TODO: Documentation missing
+ void sigusr_general_pipe_handler(int signo)
+ {
+   LOG(LEVEL_DEBUG, "([0x%08X]) received signal %d from broken socket  ",
+@@ -1174,3 +810,4 @@ void generalSignalProcess(void)
+   sigaction(SIGPIPE, &act, NULL);
+   pthread_sigmask(SIG_UNBLOCK, &errmask, NULL);
+ }
+\ No newline at end of file
++
+--- /opt/project/NIST-BGP-SRx/srx-server/./src/server/rpki_handler.c	2020-05-07 12:52:09.927785232 -0400
++++ ./src/server/rpki_handler.c	2017-12-05 16:45:32.000000000 -0500
+@@ -22,12 +22,13 @@
+  *
+  * This handler processes ROA validation
+  *
+- * @version 0.5.0.3
++ * @version 0.5.1.0
+  *
+  * Changelog:
+  * -----------------------------------------------------------------------------
+- *  0.5.0.3 - 2018/02/26 - oborchert
+- *            * fixed incorrect import.
++ *  0.5.1.0 - 2017/10/13 - oborchert
++ *            * BZ1238: Used valCacheID Id as key source during key 
++ *              registration.
+  *  0.5.0.0 - 2017/07/08 - oborchert
+  *            * Added final steps to fully integrate BGPsec path validation. 
+  *          - 2017/07/06 - oborchert
+@@ -62,8 +63,8 @@
+ #include "server/rpki_handler.h"
+ #include "server/ski_cache.h"
+ #include "server/update_cache.h"
+-#include "server/bgpsec_handler.h"
+ #include "util/log.h"
++#include "bgpsec_handler.h"
+ 
+ ///////////////////
+ // Constants
+@@ -384,7 +385,8 @@ static void handleRouterKey (uint32_t va
+     if (isAnn)
+     {
+       // A new key is announced
+-      res = srxCAPI->registerPublicKey(&bsKey, &status);
++      res = srxCAPI->registerPublicKey(&bsKey, (sca_key_source_t)valCacheID, 
++                                       &status);
+ 
+       if (res == API_SUCCESS)
+       {
+@@ -401,7 +403,8 @@ static void handleRouterKey (uint32_t va
+     else
+     {
+       // A key is withdrawn
+-      res = srxCAPI->unregisterPublicKey(&bsKey, &status);
++      res = srxCAPI->unregisterPublicKey(&bsKey, (sca_key_source_t)valCacheID, 
++                                         &status);
+       ski_unregisterKey(sCache, asn, (u_int8_t*)ski, bsKey.algoID);
+ 
+       if (res == API_SUCCESS)
+--- /opt/project/NIST-BGP-SRx/srx-server/./src/shared/rpki_router.h	2020-05-07 12:52:09.930785227 -0400
++++ ./src/shared/rpki_router.h	2017-07-11 13:40:19.000000000 -0400
+@@ -22,19 +22,10 @@
+  *
+  * RPKI/Router definitions.
+  *
+- * @version 0.5.0.4
++ * @version 0.5.0.0
+  *
+  * Changelog:
+  * -----------------------------------------------------------------------------
+- * 0.5.0.4  - 2018/03/07 - oborchert
+- *            * Added new error code of RFC 8210
+- *            * Added error string defines.
+- * 0.5.0.3  - 2018/02/28 - oborchert
+- *            * Modified RPKI_CONNECTION_TIMEOUT from 3 seconds to 10 seconds.
+- *          - 2018/02/22 - oborchert
+- *            * Updated the define RPKI_RTR_PROTOCOL_VERSION from 0 to 1
+- *            * Added define RPKI_DEFAULT_CACHE_PORT 323
+- *            * Added define RPKI_DEFAULT_CACHE "localhost"
+  * 0.5.0.0  - 2017/07/09 - oborchert
+  *            * Added include <srx/srxcryptoapi.h> and replaced hard coded 
+  *              values with the appropriate defines
+@@ -67,29 +58,6 @@
+ #include <srx/srxcryptoapi.h>
+ #include "util/prefix.h"
+ 
+-/** The lowest bit is set if the prefix PDU is an announcement */
+-#define PREFIX_FLAG_ANNOUNCEMENT  0x01
+-
+-/** The current protocol implementation. */
+-#define RPKI_RTR_PROTOCOL_VERSION 1
+-/** The default RPKI server port */
+-#define RPKI_DEFAULT_CACHE_PORT 323
+-/** The default address for a RPKI validation cache */
+-#define RPKI_DEFAULT_CACHE "localhost"
+-/** The default connection attempt timeout after 10 seconds. */
+-#define RPKI_CONNECTION_TIMEOUT 10
+-
+-#ifndef SRX_SERVER_PACKAGE
+-// Is provided by Makefile as CFLAGS -I
+-#define SRX_SERVER_PACKAGE  "NA"
+-#endif
+-// Some Macros to deal with the SRX_REVISION compiler parameter
+-#define SRX_TOOLS_STRINGIFY_ARG(ARG) " " #ARG
+-#define SRX_TOOLS_STRINGIFY_IND(ARG) SRX_TOOLS_STRINGIFY_ARG(ARG)
+-
+-// Used version number -  make a string of the define
+-#define SRX_TOOLS_VERSION  SRX_TOOLS_STRINGIFY_IND(SRX_SERVER_PACKAGE)
+-
+ /**
+  * PDU Types
+  */
+@@ -104,7 +72,7 @@ typedef enum {
+   PDU_TYPE_CACHE_RESET    = 8,  // 5.9
+   PDU_TYPE_ROUTER_KEY     = 9,  // 5.10
+   PDU_TYPE_ERROR_REPORT   = 10, // 5.11
+-  PDU_TYPE_RESERVED       = 255 // 14
++  PDU_TYPE_RESERVED       = 255
+ } RPKIRouterPDUType;
+ 
+ /**
+@@ -119,21 +87,14 @@ typedef enum {
+     RPKI_EC_UNSUPPORTED_PDU             = 5,
+     RPKI_EC_UNKNOWN_WITHDRAWL           = 6,
+     RPKI_EC_DUPLICATE_ANNOUNCEMENT      = 7,
+-    RPKI_EC_UNEXPECTED_PROTOCOL_VERSION = 8,   // NEW IN RFC8210
+-    RPKI_EC_RESERVED                    = 255  //
++    RPKI_EC_RESERVED               = 255
+ } RPKIErrorCode;
+ 
+-// Added error text with version 0.5.0.4
+-#define RPKI_ESTR_CORRUPT_DATA                "Corrupt Data\0"
+-#define RPKI_ESTR_INTERNAL_ERROR              "Internal Error\0"
+-#define RPKI_ESTR_NO_DATA_AVAILABLE           "No Data Available\0"
+-#define RPKI_ESTR_INVALID_REQUEST             "invalid Request\0"
+-#define RPKI_ESTR_UNSUPPORTED_PROT_VER        "Unsupported Protocol Version\0"
+-#define RPKI_ESTR_UNSUPPORTED_PDU             "Unsupported PDU\0"
+-#define RPKI_ESTR_UNKNOWN_WITHDRAWL           "Unknown Withdrawal\0"
+-#define RPKI_ESTR_DUPLICATE_ANNOUNCEMENT      "Duplicate Announcement\0"
+-#define RPKI_ESTR_UNEXPECTED_PROTOCOL_VERSION "Unexpected Protocol Version\0"
+-#define RPKI_ESTR_RESERVED                    "Reserved\0"
++/** The lowest bit is set if the prefix PDU is an announcement */
++#define PREFIX_FLAG_ANNOUNCEMENT  0x01
++
++/** The current protocol implementation. */
++#define RPKI_RTR_PROTOCOL_VERSION 0;
+ 
+ //
+ // The following types could be optimized but
+--- /opt/project/NIST-BGP-SRx/srx-server/./src/config.h	2020-05-07 12:59:13.657171951 -0400
++++ ./src/config.h	2020-05-07 10:55:24.472926957 -0400
+@@ -123,22 +123,19 @@
+ #define PACKAGE_NAME "SRx"
+ 
+ /* Define to the full name and version of this package. */
+-#define PACKAGE_STRING "SRx 0.5.0.5"
++#define PACKAGE_STRING "SRx 0.5.1.0"
+ 
+ /* Define to the one symbol short name of this package. */
+ #define PACKAGE_TARNAME "srx"
+ 
+-/* Define to the home page for this package. */
+-#define PACKAGE_URL ""
+-
+ /* Define to the version of this package. */
+-#define PACKAGE_VERSION "0.5.0.5"
++#define PACKAGE_VERSION "0.5.1.0"
+ 
+ /* Define to 1 if you have the ANSI C header files. */
+ #define STDC_HEADERS 1
+ 
+ /* Version number of package */
+-#define VERSION "0.5.0.5"
++#define VERSION "0.5.1.0"
+ 
+ /* pthread reentrant nature */
+ #define _REENTRANT /**/

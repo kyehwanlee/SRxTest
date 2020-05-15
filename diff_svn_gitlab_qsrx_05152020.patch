@@ -1,0 +1,216 @@
+--- /opt/project/NIST-BGP-SRx/quagga-srx/./bgpd/bgp_attr.c	2020-05-07 12:52:09.815785394 -0400
++++ ./bgpd/bgp_attr.c	2020-05-07 10:57:41.769728160 -0400
+@@ -1932,7 +1932,7 @@ static bgp_attr_parse_ret_t bgp_attr_bgp
+   SCA_BGP_PathAttribute* bsPa = (SCA_BGP_PathAttribute*)valdata->bgpsec_path_attr;
+   bsPa->flags      = args->flags;
+   bsPa->type_code  = args->type;
+-  if ((args->flags & BGP_UPD_A_FLAGS_EXT_LENGTH) > 0)
++  if ((args->flags & SCA_BGP_UPD_A_FLAGS_EXT_LENGTH) > 0)
+   {
+     SCA_BGPSEC_ExtPathAttribute* bsEPa = (SCA_BGPSEC_ExtPathAttribute*)bsPa;
+     bsEPa->attrLength = htons(args->length);
+@@ -2982,7 +2982,7 @@ bgp_packet_attribute (struct bgp *bgp, s
+         SCA_BGP_PathAttribute* pa =
+                               (SCA_BGP_PathAttribute*)valData->bgpsec_path_attr;
+         u_int16_t len = 0;
+-        if (pa->flags & BGP_UPD_A_FLAGS_EXT_LENGTH > 0)
++        if (pa->flags & SCA_BGP_UPD_A_FLAGS_EXT_LENGTH> 0)
+         {
+           len = ntohs(((SCA_BGPSEC_ExtPathAttribute*)pa)->attrLength);
+         }
+--- /opt/project/NIST-BGP-SRx/quagga-srx/./bgpd/bgp_route.c	2020-05-07 12:52:09.824785381 -0400
++++ ./bgpd/bgp_route.c	2020-05-07 10:57:41.780728144 -0400
+@@ -2867,7 +2867,7 @@ static BGPSecData* srx_create_bgpsec_dat
+   if (attr->bgpsec_validationData != NULL)
+   {
+     SCA_BGP_PathAttribute* pa = (SCA_BGP_PathAttribute*)attr->bgpsec_validationData->bgpsec_path_attr;
+-    int size = (pa->flags & BGP_UPD_A_FLAGS_EXT_LENGTH) > 0
++    int size = (pa->flags & SCA_BGP_UPD_A_FLAGS_EXT_LENGTH) > 0
+                ? ntohs(((SCA_BGPSEC_ExtPathAttribute*)pa)->attrLength)
+                : ((SCA_BGPSEC_NormPathAttribute*)pa)->attrLength;
+     if ( CHECK_FLAG(bgp->srx_config, SRX_CONFIG_EVAL_DISTR))
+--- /opt/project/NIST-BGP-SRx/quagga-srx/./bgpd/bgp_validate.c	2020-05-07 12:52:09.825785379 -0400
++++ ./bgpd/bgp_validate.c	2020-05-07 10:57:41.782728141 -0400
+@@ -918,9 +918,20 @@ SCA_Signature* signBGPSecPathAttr(struct
+   scaSignData.hashMessage = attr->bgpsec_validationData->hashMessage[BLOCK_0];
+ 
+ 
++
++  SCA_BGPSecSignData * bgpsec_data[2];
++  memset(bgpsec_data, SCA_MAX_SIGBLOCK_COUNT, sizeof(SCA_BGPSecSignData *));
++  bgpsec_data[0] = &scaSignData;
++  bgpsec_data[1] = NULL;
++
++  /* TODO: according to the number of signature blocks,
++   *       it needs to calculate the number of total signature blocks
++   */
++  int countSigBlocks = 1;
++
+   // Now do the signing. If it fails, cleanup what needs to be clean up
+   // and return 0
+-  if (bgp->srxCAPI->sign(&scaSignData) == API_FAILURE)
++  if (bgp->srxCAPI->sign(countSigBlocks, bgpsec_data) == API_FAILURE)
+   {
+     zlog_err("[BGPSEC] Signing the bgpsec path to peer %u failed status (0x%X)\n",
+             peer->as, scaSignData.status);
+--- /opt/project/NIST-BGP-SRx/quagga-srx/./bgpd/bgp_vty.c	2020-05-07 12:52:09.827785377 -0400
++++ ./bgpd/bgp_vty.c	2020-05-07 10:57:41.784728138 -0400
+@@ -1676,7 +1676,7 @@ int srx_set_ski(struct vty* vty, u_int8_
+     if (bgp->srxCAPI != NULL)
+     {
+       sca_status_t keyStatus = API_STATUS_OK;
+-      if (bgp->srxCAPI->unregisterPrivateKey(key, &keyStatus) == API_FAILURE)
++      if (bgp->srxCAPI->unregisterPrivateKey(key->asn, key->ski, key->algoID, &keyStatus) == API_FAILURE)
+       {
+         vty_out (vty, "Removal of previous router key '%s' failed (status:0x%X)!%s",
+                  skiStr, keyStatus, VTY_NEWLINE);
+--- /opt/project/NIST-BGP-SRx/quagga-srx/./lib/memtypes.h	2020-05-07 12:52:09.857785333 -0400
++++ ./lib/memtypes.h	2020-05-07 10:57:41.825728079 -0400
+@@ -134,8 +134,8 @@ enum
+   MTYPE_BGP_INFO_HASH_ITEM,
+   // see Bugzilla #20
+   MTYPE_BGP_INFO_HASH_MUTEX,
+-  MTYPE_BGPSEC_PATH,
+   MTYPE_BGPSEC_SIGNATURE,
++  MTYPE_BGPSEC_PATH,
+   MTYPE_BGPSEC_PATH_SEG,
+   MTYPE_BGPSEC_SIG_SEG,
+   MTYPE_BGPSEC_SIG_BLK,
+--- /opt/project/NIST-BGP-SRx/quagga-srx/./config.h	2020-05-07 13:03:36.942790887 -0400
++++ ./config.h	2020-05-07 11:00:19.381499948 -0400
+@@ -5,10 +5,10 @@
+ /* #undef AC_APPLE_UNIVERSAL_BUILD */
+ 
+ /* babeld vty socket */
+-#define BABEL_VTYSH_PATH "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/babeld.vty"
++#define BABEL_VTYSH_PATH "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/babeld.vty"
+ 
+ /* bgpd vty socket */
+-#define BGP_VTYSH_PATH "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/bgpd.vty"
++#define BGP_VTYSH_PATH "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/bgpd.vty"
+ 
+ /* BSDI */
+ /* #undef BSDI_NRL */
+@@ -20,7 +20,7 @@
+ #define CONSUMED_TIME_CHECK 5000000
+ 
+ /* daemon vty directory */
+-#define DAEMON_VTY_DIR "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc"
++#define DAEMON_VTY_DIR "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc"
+ 
+ /* Disable BGP installation to zebra */
+ #define DISABLE_BGP_ANNOUNCE 0
+@@ -591,7 +591,7 @@
+ #define ISIS_METHOD_PFPACKET 1
+ 
+ /* isisd vty socket */
+-#define ISIS_VTYSH_PATH "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/isisd.vty"
++#define ISIS_VTYSH_PATH "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/isisd.vty"
+ 
+ /* KAME IPv6 stack */
+ /* #undef KAME */
+@@ -623,10 +623,10 @@
+ /* #undef OPEN_BSD */
+ 
+ /* ospf6d vty socket */
+-#define OSPF6_VTYSH_PATH "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/ospf6d.vty"
++#define OSPF6_VTYSH_PATH "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/ospf6d.vty"
+ 
+ /* ospfd vty socket */
+-#define OSPF_VTYSH_PATH "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/ospfd.vty"
++#define OSPF_VTYSH_PATH "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/ospfd.vty"
+ 
+ /* Name of package */
+ #define PACKAGE "quaggasrx"
+@@ -638,7 +638,7 @@
+ #define PACKAGE_NAME "QuaggaSRx"
+ 
+ /* Define to the full name and version of this package. */
+-#define PACKAGE_STRING "QuaggaSRx 0.4.2.6"
++#define PACKAGE_STRING "QuaggaSRx 0.4.2.7"
+ 
+ /* Define to the one symbol short name of this package. */
+ #define PACKAGE_TARNAME "quaggasrx"
+@@ -647,37 +647,37 @@
+ #define PACKAGE_URL ""
+ 
+ /* Define to the version of this package. */
+-#define PACKAGE_VERSION "0.4.2.6"
++#define PACKAGE_VERSION "0.4.2.7"
+ 
+ /* Have openpam_ttyconv */
+ /* #undef PAM_CONV_FUNC */
+ 
+ /* babeld PID */
+-#define PATH_BABELD_PID "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/babeld.pid"
++#define PATH_BABELD_PID "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/babeld.pid"
+ 
+ /* bgpd PID */
+-#define PATH_BGPD_PID "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/bgpd.pid"
++#define PATH_BGPD_PID "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/bgpd.pid"
+ 
+ /* isisd PID */
+-#define PATH_ISISD_PID "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/isisd.pid"
++#define PATH_ISISD_PID "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/isisd.pid"
+ 
+ /* ospf6d PID */
+-#define PATH_OSPF6D_PID "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/ospf6d.pid"
++#define PATH_OSPF6D_PID "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/ospf6d.pid"
+ 
+ /* ospfd PID */
+-#define PATH_OSPFD_PID "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/ospfd.pid"
++#define PATH_OSPFD_PID "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/ospfd.pid"
+ 
+ /* ripd PID */
+-#define PATH_RIPD_PID "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/ripd.pid"
++#define PATH_RIPD_PID "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/ripd.pid"
+ 
+ /* ripngd PID */
+-#define PATH_RIPNGD_PID "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/ripngd.pid"
++#define PATH_RIPNGD_PID "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/ripngd.pid"
+ 
+ /* watchquagga PID */
+-#define PATH_WATCHQUAGGA_PID "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/watchquagga.pid"
++#define PATH_WATCHQUAGGA_PID "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/watchquagga.pid"
+ 
+ /* zebra PID */
+-#define PATH_ZEBRA_PID "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/zebra.pid"
++#define PATH_ZEBRA_PID "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/zebra.pid"
+ 
+ /* Quagga Group */
+ #define QUAGGA_GROUP "root"
+@@ -692,10 +692,10 @@
+ #define RETSIGTYPE void
+ 
+ /* ripng vty socket */
+-#define RIPNG_VTYSH_PATH "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/ripngd.vty"
++#define RIPNG_VTYSH_PATH "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/ripngd.vty"
+ 
+ /* rip vty socket */
+-#define RIP_VTYSH_PATH "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/ripd.vty"
++#define RIP_VTYSH_PATH "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/ripd.vty"
+ 
+ /* Define to the type of arg 1 for `select'. */
+ #define SELECT_TYPE_ARG1 int
+@@ -768,7 +768,7 @@
+ 
+ 
+ /* Version number of package */
+-#define VERSION "0.4.2.6"
++#define VERSION "0.4.2.7"
+ 
+ /* VTY shell */
+ /* #undef VTYSH */
+@@ -789,10 +789,10 @@
+ #endif
+ 
+ /* zebra api socket */
+-#define ZEBRA_SERV_PATH "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/zserv.api"
++#define ZEBRA_SERV_PATH "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/zserv.api"
+ 
+ /* zebra vty socket */
+-#define ZEBRA_VTYSH_PATH "/opt/project/TestBgpsecImple/NIST-BGP-SRx/quagga-srx/../_inst/etc/zebra.vty"
++#define ZEBRA_VTYSH_PATH "/opt/project/TestBgpsecImple/test_install/qsrx/../_inst/etc/zebra.vty"
+ 
+ /* Enable large inode numbers on Mac OS X 10.5.  */
+ #ifndef _DARWIN_USE_64_BIT_INODE
