@@ -1,0 +1,115 @@
+--- ./srx/srxcryptoapi.h	2017-11-27 15:17:52.000000000 -0500
++++ /opt/project/NIST-gitlab/srx-crypto-api/./srx/srxcryptoapi.h	2020-05-18 02:15:26.455025252 -0400
+@@ -23,7 +23,9 @@
+  * 
+  * ChangeLog:
+  * -----------------------------------------------------------------------------
+- *   0.3.0.0 - 2017/09/13 - oborchert
++ *   0.3.0.0 - 2018/11/29 - oborchert
++ *             * Removed all "merged" comments to make future merging easier
++ *           - 2017/09/13 - oborchert
+  *             * Added wording to the init method, when it has to return FAILURE
+  *           - 2017/08/18 - oborchert
+  *             * Modified description of cleanKeys to clean only public keys and
+@@ -46,7 +48,6 @@
+  *               behavior. See function description for more detail.
+  *             * Added function isAlgorithmSupported
+  *   0.2.0.4 - 2017/09/15 - oborchert
+- *             (merged from branch)
+  *             * Added more documentation.
+  *   0.2.0.3 - 2017/07/09 - oborchert
+  *             * Added define ECDSA_PUB_KEY_DER_LENGTH
+--- ./srxcryptoapi.c	2017-11-28 16:52:55.000000000 -0500
++++ /opt/project/NIST-gitlab/srx-crypto-api/./srxcryptoapi.c	2020-05-18 02:15:26.457025249 -0400
+@@ -1701,7 +1701,7 @@ int sca_generateHashMessage(SCA_BGPSecVa
+  * 
+  * @return Return the hash message.
+  */
+-SCA_HashMessage* sca_generateOriginHashMessage(u_int32_t targetAS, 
++SCA_HashMessage* sca_gnenerateOriginHashMessage(u_int32_t targetAS, 
+                                             SCA_BGPSEC_SecurePathSegment* spSeg, 
+                                             SCA_Prefix* nlri, u_int8_t algoID)
+ {
+--- ./crypto_imple.c	2017-11-27 15:17:52.000000000 -0500
++++ /opt/project/NIST-gitlab/srx-crypto-api/./crypto_imple.c	2020-05-18 02:15:26.447025264 -0400
+@@ -23,10 +23,13 @@
+  *   At this time only PEM formated private keys can be loaded and the keys must
+  *   fir CURVE_ECDSA_P_256
+  *
+- * @version 0.2.0.4
++ * @version 0.2.0.7
+  * 
+  * ChangeLog:
+  * -----------------------------------------------------------------------------
++ *   0.2.0.7 - 2018/11/27 - oborchert
++ *             * Replaced OpenSSL deprecated code with new functions or other 
++ *               ones.
+  *   0.2.0.4 - 2017/09/13 - oborchert
+  *             * Fixed memset bug in _new_pub_ecpoint2Der.
+  *   0.2.0.3 - 2017/04/21 - oborchert
+@@ -205,9 +208,13 @@ static bool _getPublicKey(X509* cert, BG
+     if (ecPointPublicKey != NULL)
+     {
+       memset (&asn1Buff, '\0', ASN1_BUFF_SIZE);
+-      asn1Len = ASN1_STRING_length(cert->cert_info->key->public_key);
+-      memcpy (asn1Buff, ASN1_STRING_data(cert->cert_info->key->public_key),
+-              asn1Len);
++      ASN1_BIT_STRING* asn1BS = X509_get0_pubkey_bitstr(cert);
++      asn1Len = ASN1_STRING_length(asn1BS);
++#if defined OPENSSL_API_COMPAT && OPENSSL_API_COMPAT < 0x10100000L      
++      memcpy (asn1Buff, ASN1_STRING_get0_data(asn1BS), asn1Len);
++#else
++      memcpy (asn1Buff, ASN1_STRING_data(asn1BS), asn1Len);
++#endif
+       ecdsa_key = EC_KEY_new_by_curve_name(curveID);
+       if (ecdsa_key != NULL)
+       {
+@@ -358,7 +365,9 @@ static bool _loadPubKey(char* fName, BGP
+   EVP_cleanup();
+   ENGINE_cleanup();
+   CRYPTO_cleanup_all_ex_data();
+-  ERR_remove_state(0);
++  // Replace ERR_remove_state(0) with ERR_clear_error due to deprecation
++  //ERR_remove_state(0);
++  ERR_clear_error();
+   ERR_free_strings();
+   
+   return retVal;
+--- ./srx_api_test.c	2017-11-27 15:17:52.000000000 -0500
++++ /opt/project/NIST-gitlab/srx-crypto-api/./srx_api_test.c	2020-05-18 02:15:26.456025251 -0400
+@@ -26,12 +26,14 @@
+  * 
+  * Changelog:
+  * -----------------------------------------------------------------------------
+- *   0.3.0.0 - 2017/09/06 - oborchert
++ *   0.3.0.0 - 2018/11/29 - oborchert
++ *             * Removed all "merged" comments to make future merging easier
++ *           - 2017/09/06 - oborchert
+  *             - Fixed missing type in static variable declaration.
+  *           - 2017/08/17 - oborchert
+  *             - Removed structure KeyTester. API changed in such that it became 
+  *               obsolete for the task it was needed.
+- *   0.2.0.4 - 2017/09/12 - oborchert (merged from branch)
++ *   0.2.0.4 - 2017/09/12 - oborchert
+  *             * Moved SCA 0.2.x into branch for further bugfixes. Trunk will
+  *               is different.
+  *             * Added missing integer type in static variable TEST_1
+--- ./bgpsec_openssl/key_storage.h	2017-11-27 15:17:52.000000000 -0500
++++ /opt/project/NIST-gitlab/srx-crypto-api/./bgpsec_openssl/key_storage.h	2020-05-18 02:15:26.435025281 -0400
+@@ -27,10 +27,15 @@
+  * Known Issue:
+  *   At this time only pem formated private keys can be loaded.
+  * 
+- * @version 0.2.0.3
++ * @version 0.3.0.0
+  * 
+  * Changelog:
+  * -----------------------------------------------------------------------------
++ *  0.3.0.0 - 2017/08/18 - oborchert
++ *            * Added source to structure _KS_Key_Element
++ *            * Added source parameter to ks_... functions.
++ *            * Added missing documentation
++ *            * Added funtion ks_removeSource
+  *  0.2.0.3 - 2017/07/09 - oborchert
+  *            * Modified return value documentation of function ks_getKey which
+  *              mentioned DER key but did not mention it encapsulated in the 
